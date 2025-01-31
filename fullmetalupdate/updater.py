@@ -48,14 +48,14 @@ class AsyncUpdater(object):
         self.repo_os = repo
 
         self.remote_name_os = None
-        self.repo_containers = OSTree.Repo.new(Gio.File.new_for_path(PATH_REPO_APPS))
-        if os.path.exists(PATH_REPO_APPS):
-            self.logger.info("Preinstalled OSTree for containers, we use it")
-            self.repo_containers.open(None)
-        else:
-            self.logger.info("No preinstalled OSTree for containers, we create "
-                             "one")
-            self.repo_containers.create(OSTree.RepoMode.BARE_USER_ONLY, None)
+        # self.repo_containers = OSTree.Repo.new(Gio.File.new_for_path(PATH_REPO_APPS))
+        # if os.path.exists(PATH_REPO_APPS):
+        #     self.logger.info("Preinstalled OSTree for containers, we use it")
+        #     self.repo_containers.open(None)
+        # else:
+        #     self.logger.info("No preinstalled OSTree for containers, we create "
+        #                      "one")
+        #     self.repo_containers.create(OSTree.RepoMode.BARE_USER_ONLY, None)
 
     def mark_os_successful(self):
         """
@@ -138,16 +138,16 @@ class AsyncUpdater(object):
                                         opts, None)
             self.remote_name_os = ostree_remote_attributes['name']
 
-            [_, refs] = self.repo_containers.list_refs(None, None)
+            # [_, refs] = self.repo_containers.list_refs(None, None)
 
-            self.logger.info("Initalize remotes for the containers ostree: {}".format(refs))
-            for ref in refs:
-                remote_name = ref.split(':')[0]
-                if remote_name not in self.repo_containers.remote_list():
-                    self.logger.info("We had the remote: {}".format(remote_name))
-                    self.repo_containers.remote_add(remote_name,
-                                                    ostree_remote_attributes['url'],
-                                                    opts, None)
+            # self.logger.info("Initalize remotes for the containers ostree: {}".format(refs))
+            # for ref in refs:
+            #     remote_name = ref.split(':')[0]
+            #     if remote_name not in self.repo_containers.remote_list():
+            #         self.logger.info("We had the remote: {}".format(remote_name))
+            #         self.repo_containers.remote_add(remote_name,
+            #                                         ostree_remote_attributes['url'],
+            #                                         opts, None)
 
         except GLib.Error as e:
             self.logger.error("OSTRee remote initialization failed ({})".format(str(e)))
@@ -202,24 +202,24 @@ class AsyncUpdater(object):
          - True if the containers are successfully initialized
          - False otherwise
         """
-        res = True
-        self.logger.info("Getting refs from repo:{}".format(PATH_REPO_APPS))
+        # res = True
+        # self.logger.info("Getting refs from repo:{}".format(PATH_REPO_APPS))
 
-        try:
-            [_, refs] = self.repo_containers.list_refs(None, None)
-            for ref in refs:
-                container_name = ref.split(':')[1]
-                if not os.path.isfile(PATH_APPS + '/' + container_name + '/' + VALIDATE_CHECKOUT):
-                    self.checkout_container(container_name, None)
-                    self.update_container_ids(container_name)
-                if not res:
-                    self.logger.error("Error when checking out container:{}".format(container_name))
-                    break
-                self.create_and_start_unit(container_name)
-        except (GLib.Error, Exception) as e:
-            self.logger.error("Error checking out containers repo ({})".format(e))
-            res = False
-        return res
+        # try:
+        #     [_, refs] = self.repo_containers.list_refs(None, None)
+        #     for ref in refs:
+        #         container_name = ref.split(':')[1]
+        #         if not os.path.isfile(PATH_APPS + '/' + container_name + '/' + VALIDATE_CHECKOUT):
+        #             self.checkout_container(container_name, None)
+        #             self.update_container_ids(container_name)
+        #         if not res:
+        #             self.logger.error("Error when checking out container:{}".format(container_name))
+        #             break
+        #         self.create_and_start_unit(container_name)
+        # except (GLib.Error, Exception) as e:
+        #     self.logger.error("Error checking out containers repo ({})".format(e))
+        #     res = False
+        # return res
 
     def start_unit(self, container_name):
         """This method starts the systemd unit for container_name."""
