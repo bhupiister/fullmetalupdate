@@ -60,14 +60,14 @@ class AsyncUpdater(object):
         self.repo_os = repo
 
         self.remote_name_os = None
-        self.repo_containers = OSTree.Repo.new(Gio.File.new_for_path(PATH_REPO_APPS))
-        if os.path.exists(PATH_REPO_APPS):
-            self.logger.info("Preinstalled OSTree for containers, we use it")
-            self.repo_containers.open(None)
-        else:
-            self.logger.info("No preinstalled OSTree for containers, we create "
-                             "one")
-            self.repo_containers.create(OSTree.RepoMode.BARE_USER_ONLY, None)
+        # self.repo_containers = OSTree.Repo.new(Gio.File.new_for_path(PATH_REPO_APPS))
+        # if os.path.exists(PATH_REPO_APPS):
+        #     self.logger.info("Preinstalled OSTree for containers, we use it")
+        #     self.repo_containers.open(None)
+        # else:
+        #     self.logger.info("No preinstalled OSTree for containers, we create "
+        #                      "one")
+        #     self.repo_containers.create(OSTree.RepoMode.BARE_USER_ONLY, None)
 
     def mark_os_successful(self):
         """ This method marks the currently running OS as successful by setting the init_var u-boot environment variable to 1.
@@ -214,21 +214,21 @@ class AsyncUpdater(object):
         # res = True
         # self.logger.info("Getting refs from repo:{}".format(PATH_REPO_APPS))
 
-        try:
-            [_, refs] = self.repo_containers.list_refs(None, None)
-            for ref in refs:
-                container_name = ref.split(':')[1]
-                if not os.path.isfile(PATH_APPS + '/' + container_name + '/' + VALIDATE_CHECKOUT):
-                    self.checkout_container(container_name, None)
-                    self.update_container_ids(container_name)
-                if not res:
-                    self.logger.error("Error when checking out container:{}".format(container_name))
-                    break
-                self.create_and_start_unit(container_name)
-        except (GLib.Error, Exception) as e:
-            self.logger.error("Error checking out containers repo ({})".format(e))
-            res = False
-        return res
+        # try:
+        #     [_, refs] = self.repo_containers.list_refs(None, None)
+        #     for ref in refs:
+        #         container_name = ref.split(':')[1]
+        #         if not os.path.isfile(PATH_APPS + '/' + container_name + '/' + VALIDATE_CHECKOUT):
+        #             self.checkout_container(container_name, None)
+        #             self.update_container_ids(container_name)
+        #         if not res:
+        #             self.logger.error("Error when checking out container:{}".format(container_name))
+        #             break
+        #         self.create_and_start_unit(container_name)
+        # except (GLib.Error, Exception) as e:
+        #     self.logger.error("Error checking out containers repo ({})".format(e))
+        #     res = False
+        # return res
 
     def create_unit(self, container_name):
         """ 
