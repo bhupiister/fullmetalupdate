@@ -81,8 +81,8 @@ async def main():
         client = FullMetalUpdateDDIClient(session, HOST, SSL, TENANT_ID, TARGET_NAME,
                                           AUTH_TOKEN, ATTRIBUTES)
 
-        if not client.init_checkout_existing_containers():
-            client.logger.info("There is no containers pre-installed on the target")
+        # if not client.init_checkout_existing_containers():
+        #     client.logger.info("There is no containers pre-installed on the target")
 
         if not client.init_ostree_remotes(OSTREE_REMOTE_ATTRIBUTES):
             client.logger.error("Cannot initialize OSTree remote from config file '{}'".format(cfg_path.name))
@@ -91,5 +91,7 @@ async def main():
 
 if __name__ == '__main__':
     # create event loop, open aiohttp client session and start polling
-    loop = asyncio.get_event_loop()
+    # loop = asyncio.get_event_loop()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     loop.run_until_complete(main())
