@@ -66,7 +66,7 @@ class AsyncUpdater(object):
             self.repo_containers.open(None)
         else:
             self.logger.info("No preinstalled OSTree for containers, we create one")
-            self.repo_containers.create(OSTree.RepoMode.BARE_USER_ONLY, None)
+            self.repo_containers.create(OSTree.RepoMode.ARCHIVE_Z2, None)
 
     def mark_os_successful(self):
         """ This method marks the currently running OS as successful by setting the init_var u-boot environment variable to 1.
@@ -146,16 +146,15 @@ class AsyncUpdater(object):
                                         opts, None)
             self.remote_name_os = ostree_remote_attributes['name']
 
-            [_, refs] = self.repo_containers.list_refs(None, None)
+            # [_, refs] = self.repo_containers.list_refs(None, None)
 
-            self.logger.info("Initalize remotes for the containers ostree: {}".format(refs))
-            for ref in refs:
-                remote_name = ref.split(':')[0]
-                if remote_name not in self.repo_containers.remote_list():
-                    self.logger.info("We had the remote: {}".format(remote_name))
-                    self.repo_containers.remote_add(remote_name,
-                                                    ostree_remote_attributes['url'],
-                                                    opts, None)
+            remote_name = "mad-matisse-gen3-containers"
+            self.logger.info("Initalize remotes for the containers ostree: {}".format(remote_name))
+            if remote_name not in self.repo_containers.remote_list():
+                self.logger.info("We had the remote: {}".format(remote_name))
+                self.repo_containers.remote_add(remote_name,
+                                                ostree_remote_attributes['url'],
+                                                opts, None)
 
         except GLib.Error as e:
             self.logger.error("OSTRee remote initialization failed ({})".format(str(e)))
@@ -216,6 +215,9 @@ class AsyncUpdater(object):
         try:
             [_, refs] = self.repo_containers.list_refs(None, None)
             self.logger.info("There are {} containers to be started.".format(len(refs)))
+
+            self.disable_podman()
+
             for ref in refs:
                 container_name = ref.split(':')[1]
                 if not os.path.isfile(PATH_APPS + '/' + container_name + '/' + VALIDATE_CHECKOUT):
@@ -226,6 +228,9 @@ class AsyncUpdater(object):
                     break
                 self.create_unit(container_name)
             self.systemd.Reload()
+            
+            self.enable_podman()
+
             for ref in refs:
                 container_name = ref.split(':')[1]
                 if os.path.isfile(PATH_APPS + '/' + container_name + '/' + FILE_AUTOSTART):
@@ -235,6 +240,28 @@ class AsyncUpdater(object):
             res = False
         finally:
             return res
+
+    def enable_podman(self):
+        service = self.systemd.ListUnitsByNames(['podman.socket'])
+        if service[0][2] != 'not-found':
+            self.logger.info("Start the service {}".format('podman.socket'))
+            self.start_service('podman.socket')
+        
+        service = self.systemd.ListUnitsByNames(['podman.service'])
+        if service[0][2] != 'not-found':
+            self.logger.info("Start the service {}".format('podman.service'))
+            self.start_service('podman.service')
+
+    def disable_podman(self):
+        service = self.systemd.ListUnitsByNames(['podman.socket'])
+        if service[0][2] != 'not-found':
+            self.logger.info("Stop the service {}".format('podman.socket'))
+            self.stop_service('podman.socket')
+        
+        service = self.systemd.ListUnitsByNames(['podman.service'])
+        if service[0][2] != 'not-found':
+            self.logger.info("Stop the service {}".format('podman.service'))
+            self.stop_service('podman.service')
 
     def create_unit(self, container_name):
         """ 
@@ -257,6 +284,16 @@ class AsyncUpdater(object):
         self.logger.info("Since FILE_AUTOSTART is present, start the container using systemd")
         self.systemd.StartUnit(container_name + '.service', "replace")
 
+    def start_service(self, service_name):
+        """ 
+        This method enables and then starts the systemd unit for the relevant service. 
+
+        :param string service_name: Name of the Service.
+        """
+        self.logger.info("Enable the service {}".format(service_name))
+        self.systemd.EnableUnitFiles([service_name], False, False)
+        self.systemd.StartUnit(service_name, "replace")
+
     def stop_unit(self, container_name):
         """
         This method stops the systemd unit for the relevant container.
@@ -267,6 +304,16 @@ class AsyncUpdater(object):
         self.systemd.StopUnit(container_name + '.service', "replace")
         self.logger.info("Disable the container {}".format(container_name))
         self.systemd.DisableUnitFiles([container_name + '.service'], False)
+
+    def stop_service(self, service_name):
+        """
+        This method stops the systemd unit for the relevant service.
+
+        :param string service_name: Name of the service.
+        """
+        self.logger.info("Disable the service {}".format(service_name))
+        self.systemd.StopUnit(service_name, "replace")
+        self.systemd.DisableUnitFiles([service_name], False)
 
     def pull_ostree_ref(self, is_container, ref_sha, ref_name=None):
         """
