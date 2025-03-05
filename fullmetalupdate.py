@@ -54,13 +54,16 @@ async def main():
 
     local_domain_name = config.get('server', 'server_host_name')
 
-    HOST = local_domain_name + ":" + config.get('client', 'hawkbit_url_port')
+    OSTREE_SUBDOMAIN = config.get('client', 'ostree_subdomain')
+    HAWKBIT_SUBDOMAIN = config.get('client', 'hawkbit_subdomain')
+
+    HOST = HAWKBIT_SUBDOMAIN + "." + local_domain_name
     SSL = config.getboolean('client', 'hawkbit_ssl')
     TENANT_ID = config.get('client', 'hawkbit_tenant_id')
     TARGET_NAME = config.get('client', 'hawkbit_target_name')
     AUTH_TOKEN = config.get('client', 'hawkbit_auth_token')
     ATTRIBUTES = {'FullMetalUpdate': config.get('client', 'hawkbit_target_name')}
-
+    
     if strtobool(config.get('ostree', 'ostree_ssl')):
         url_type = 'https://'
     else:
@@ -68,7 +71,7 @@ async def main():
 
     OSTREE_REMOTE_ATTRIBUTES = {'name': config.get('ostree', 'ostree_name_remote'),
                                 'gpg-verify': strtobool(config.get('ostree', 'ostree_gpg-verify')),
-                                'url': url_type + local_domain_name + ":" + config.get('ostree', 'ostree_url_port')}
+                                'url': url_type + OSTREE_SUBDOMAIN + "." + local_domain_name}
 
     if args.debug:
         LOG_LEVEL = logging.DEBUG
