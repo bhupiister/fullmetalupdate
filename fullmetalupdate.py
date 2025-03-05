@@ -54,7 +54,7 @@ async def main():
 
     local_domain_name = config.get('server', 'server_host_name')
 
-    OSTREE_SUBDOMAIN = config.get('client', 'ostree_subdomain')
+    OSTREE_SUBDOMAIN = config.get('ostree', 'ostree_subdomain')
     HAWKBIT_SUBDOMAIN = config.get('client', 'hawkbit_subdomain')
 
     HOST = HAWKBIT_SUBDOMAIN + "." + local_domain_name
