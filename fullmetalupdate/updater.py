@@ -227,6 +227,9 @@ class AsyncUpdater(object):
                     self.logger.error("Error when checking out container:{}".format(container_name))
                     break
                 self.create_unit(container_name)
+            
+            # Prashant to add the whiteout file creation step here
+
             self.systemd.Reload()
             
             self.enable_podman()
