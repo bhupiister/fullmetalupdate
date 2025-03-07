@@ -52,26 +52,26 @@ async def main():
     except Exception:
         LOG_LEVEL = logging.INFO
 
-    local_domain_name = config.get('server', 'server_host_name')
+    server_host_name_qdn = config.get('server', 'server_host_name_qdn')
 
     OSTREE_SUBDOMAIN = config.get('ostree', 'ostree_subdomain')
     HAWKBIT_SUBDOMAIN = config.get('client', 'hawkbit_subdomain')
 
-    HOST = HAWKBIT_SUBDOMAIN + "." + local_domain_name
-    SSL = config.getboolean('client', 'hawkbit_ssl')
+    HOST = HAWKBIT_SUBDOMAIN + "." + server_host_name_qdn
+    SSL = config.getboolean('client', 'hawkbit_ssl_device')
     TENANT_ID = config.get('client', 'hawkbit_tenant_id')
     TARGET_NAME = config.get('client', 'hawkbit_target_name')
     AUTH_TOKEN = config.get('client', 'hawkbit_auth_token')
     ATTRIBUTES = {'FullMetalUpdate': config.get('client', 'hawkbit_target_name')}
     
-    if strtobool(config.get('ostree', 'ostree_ssl')):
+    if strtobool(config.get('ostree', 'ostree_ssl_device')):
         url_type = 'https://'
     else:
         url_type = 'http://'
 
     OSTREE_REMOTE_ATTRIBUTES = {'name': config.get('ostree', 'ostree_name_remote'),
                                 'gpg-verify': strtobool(config.get('ostree', 'ostree_gpg-verify')),
-                                'url': url_type + OSTREE_SUBDOMAIN + "." + local_domain_name}
+                                'url': url_type + OSTREE_SUBDOMAIN + "." + server_host_name_qdn}
 
     if args.debug:
         LOG_LEVEL = logging.DEBUG
