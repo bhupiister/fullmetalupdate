@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import json
 import gi
+import stat
+from pathlib import Path
 
 gi.require_version("OSTree", "1.0")
 from gi.repository import OSTree, GLib, Gio
@@ -198,6 +200,42 @@ class AsyncUpdater(object):
         except (FileNotFoundError, KeyError):
             return None
 
+    def create_whiteouts(self, store_dir: Path, whiteout_dir):
+        store_dir = Path(store_dir)
+        whiteout_dir = Path(whiteout_dir)
+        whiteout_dir.mkdir(parents=True, exist_ok=True)
+        self.logger.info(f"Creating whiteout markers for special files in {store_dir}...")
+
+        for file in store_dir.rglob("*"):
+            if not file.exists():
+                continue
+
+            file_stat = os.lstat(file)
+
+            if file.is_symlink():
+                continue
+
+            if stat.S_ISFIFO(file_stat.st_mode) or stat.S_ISBLK(file_stat.st_mode) or \
+               stat.S_ISCHR(file_stat.st_mode) or stat.S_ISSOCK(file_stat.st_mode):
+                relative_path = file.relative_to(store_dir)
+                whiteout_file = store_dir / f".wh.{file.name}"
+                metadata_file = whiteout_dir / f"{relative_path}.meta"
+
+                self.logger.info(f"Whiteout: {file} -> {whiteout_file}")
+                whiteout_file.touch()
+                metadata_file.parent.mkdir(parents=True, exist_ok=True)
+
+                metadata = [
+                    f"{file_stat.st_mode:o} {file_stat.st_uid} {file_stat.st_gid}"
+                ]
+
+                if stat.S_ISCHR(file_stat.st_mode) or stat.S_ISBLK(file_stat.st_mode):
+                    metadata.append(f"{os.major(file_stat.st_rdev)} {os.minor(file_stat.st_rdev)}")
+
+                metadata_file.write_text("\n".join(metadata))
+                os.chmod(file, stat.S_IWUSR)
+                file.unlink()
+
     def init_checkout_existing_containers(self):
         """
         This method manages:
@@ -223,12 +261,15 @@ class AsyncUpdater(object):
                 if not os.path.isfile(PATH_APPS + '/' + container_name + '/' + VALIDATE_CHECKOUT):
                     self.checkout_container(container_name, None)
                     self.update_container_ids(container_name)
+                    # Prashant to add the whiteout file creation step here
+                    store_dir = os.path.join(PATH_APPS + '/' + container_name)
+                    whiteout_dir = os.path.join(PATH_APPS, ".whiteout-metadata")
+                    self.create_whiteouts(store_dir, whiteout_dir)
                 if not res:
                     self.logger.error("Error when checking out container:{}".format(container_name))
                     break
                 self.create_unit(container_name)
             
-            # Prashant to add the whiteout file creation step here
 
             self.systemd.Reload()
             

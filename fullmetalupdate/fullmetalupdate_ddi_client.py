@@ -134,6 +134,7 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
 
         :param dictionnary base: Dictionnary storing information about a Hawkbit update.
         """
+        feedbackMsg = ''
         
         if self.action_id is not None:
             self.logger.info('Deployment is already in progress')
