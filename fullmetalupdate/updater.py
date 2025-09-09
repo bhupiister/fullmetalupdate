@@ -8,6 +8,9 @@ import json
 import gi
 import stat
 from pathlib import Path
+import errno
+import subprocess
+import time
 
 gi.require_version("OSTree", "1.0")
 from gi.repository import OSTree, GLib, Gio
@@ -472,6 +475,61 @@ class AsyncUpdater(object):
             return False
         return True
 
+    @staticmethod
+    def _umount_all_under(root_path, logger):
+        """
+        Lazy-unmount any mountpoints that live at or beneath root_path.
+        Handles overlay/merged, tmpfs, bind mounts, etc.
+        """
+        try:
+            cp = subprocess.run(["mount"], capture_output=True, text=True, check=False)
+            mps = []
+            root = os.path.abspath(root_path).rstrip("/")
+            for line in cp.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 3:
+                    mnt = parts[2]
+                    if mnt == root or mnt.startswith(root + "/"):
+                        mps.append(mnt)
+            # Unmount deepest-first
+            for mnt in sorted(set(mps), key=len, reverse=True):
+                subprocess.run(["umount", "-l", mnt], check=False)
+                logger.info("Unmounted mount under app dir: %s", mnt)
+        except Exception as e:
+            logger.warning("umount-under failed for %s: %s", root_path, e)
+
+    @staticmethod
+    def _stop_stack_gracefully(container_name, logger, apps_root):
+        load_path = os.path.join(apps_root, container_name, 'load')
+        if os.path.exists(load_path) and os.access(load_path, os.X_OK):
+            try:
+                subprocess.run([load_path, 'stop'], check=False, timeout=120)
+                logger.info("Called load stop for %s", container_name)
+            except Exception as e:
+                logger.warning("load stop failed for %s: %s", container_name, e)
+        # wait up to ~30s for common podman shm mounts to disappear
+        for _ in range(30):
+            cp = subprocess.run(
+                "mount | grep -E '/containers/.*/userdata/shm'",
+                shell=True, check=False
+            )
+            if cp.returncode != 0:
+                break
+            time.sleep(1)
+
+    @staticmethod
+    def _lazy_unmount_container_shm(logger):
+        try:
+            cp = subprocess.run(
+                "mount | awk '/containers\\/.*\\/userdata\\/shm/ {print $3}'",
+                shell=True, check=False, capture_output=True, text=True
+            )
+            for mnt in [m for m in cp.stdout.splitlines() if m]:
+                subprocess.run(['umount', '-l', mnt], check=False)
+                logger.info("Lazy-unmounted lingering shm: %s", mnt)
+        except Exception as e:
+            logger.warning("Unable to lazy-unmount shm: %s", e)
+
     def checkout_container(self, container_name, rev_number):
         """
         This method checks out a container into its corresponding folder, to a given commit revision.
@@ -484,7 +542,7 @@ class AsyncUpdater(object):
         if service[0][2] != 'not-found':
             self.logger.info("Stop the container {}".format(container_name))
             self.stop_unit(container_name)
-
+        self._stop_stack_gracefully(container_name, self.logger, PATH_APPS)
         res = True
         rootfs_fd = None
         try:
@@ -502,8 +560,20 @@ class AsyncUpdater(object):
             else:
                 rev = rev_number
             self.logger.info("Rev value:{}".format(rev))
-            if os.path.isdir(PATH_APPS + '/' + container_name):
-                shutil.rmtree(PATH_APPS + '/' + container_name)
+            full_path = os.path.join(PATH_APPS, container_name)
+            self._umount_all_under(full_path, self.logger)
+            if os.path.isdir(full_path):
+                try:
+                    shutil.rmtree(full_path)
+                except OSError as e:
+                    if e.errno == errno.EBUSY:
+                        self.logger.warning("rmtree busy on %s: %s; trying lazy shm unmount",
+                                        container_name, e)
+                        self._umount_all_under(full_path, self.logger)
+                        self._lazy_unmount_container_shm(self.logger)
+                        shutil.rmtree(full_path)
+                    else:
+                        raise
             os.mkdir(PATH_APPS + '/' + container_name)
             self.logger.info("Create directory {}/{}".format(PATH_APPS, container_name))
             rootfs_fd = os.open(PATH_APPS + '/' + container_name, os.O_DIRECTORY)
