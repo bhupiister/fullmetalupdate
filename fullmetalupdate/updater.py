@@ -257,6 +257,7 @@ class AsyncUpdater(object):
             [_, refs] = self.repo_containers.list_refs(None, None)
             self.logger.info("There are {} containers to be started.".format(len(refs)))
 
+            self.disable_watcher()
             self.disable_podman()
 
             for ref in refs:
@@ -272,10 +273,11 @@ class AsyncUpdater(object):
                     self.logger.error("Error when checking out container:{}".format(container_name))
                     break
                 self.create_unit(container_name)
-            
+
 
             self.systemd.Reload()
-            
+
+            self.enable_watcher()
             self.enable_podman()
 
             for ref in refs:
@@ -293,7 +295,7 @@ class AsyncUpdater(object):
         if service[0][2] != 'not-found':
             self.logger.info("Start the service {}".format('podman.socket'))
             self.start_service('podman.socket')
-        
+
         service = self.systemd.ListUnitsByNames(['podman.service'])
         if service[0][2] != 'not-found':
             self.logger.info("Start the service {}".format('podman.service'))
@@ -304,14 +306,26 @@ class AsyncUpdater(object):
         if service[0][2] != 'not-found':
             self.logger.info("Stop the service {}".format('podman.socket'))
             self.stop_service('podman.socket')
-        
+
         service = self.systemd.ListUnitsByNames(['podman.service'])
         if service[0][2] != 'not-found':
             self.logger.info("Stop the service {}".format('podman.service'))
             self.stop_service('podman.service')
 
+    def enable_watcher(self):
+        service = self.systemd.ListUnitsByNames(['containers-watcher.service'])
+        if service[0][2] != 'not-found':
+            self.logger.info("Start the containers-watcher.service")
+            self.start_service('containers-watcher.service')
+
+    def disable_watcher(self):
+        service = self.systemd.ListUnitsByNames(['containers-watcher.service'])
+        if service[0][2] != 'not-found':
+            self.logger.info("Stop the containers-watcher.service")
+            self.stop_service('containers-watcher.service')
+
     def create_unit(self, container_name):
-        """ 
+        """
         This method copies the .service file from /apps partition to /etc/systemd/system/ in order to create the unit for the relevant container.
 
         :param string container_name: Name of the container.
@@ -321,8 +335,8 @@ class AsyncUpdater(object):
                     PATH_SYSTEMD_UNITS + container_name + '.service')
 
     def start_unit(self, container_name):
-        """ 
-        This method enables and then starts the systemd unit for the relevant container. 
+        """
+        This method enables and then starts the systemd unit for the relevant container.
 
         :param string container_name: Name of the container.
         """
@@ -332,8 +346,8 @@ class AsyncUpdater(object):
         self.systemd.StartUnit(container_name + '.service', "replace")
 
     def start_service(self, service_name):
-        """ 
-        This method enables and then starts the systemd unit for the relevant service. 
+        """
+        This method enables and then starts the systemd unit for the relevant service.
 
         :param string service_name: Name of the Service.
         """
@@ -589,7 +603,7 @@ class AsyncUpdater(object):
             raise Exception("Checking out {} failed (returned False)")
 
     def ostree_stage_tree(self, rev_number):
-        """ 
+        """
         Wrapper around sysroot.stage_tree()
 
         Deploy new revision, however finalization only occurs at shutdown time.
