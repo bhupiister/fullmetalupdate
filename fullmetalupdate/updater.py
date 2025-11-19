@@ -490,6 +490,63 @@ class AsyncUpdater(object):
         return True
 
     @staticmethod
+    def _force_rmtree(path, logger, max_attempts=5):
+        """
+        Aggressively remove a directory tree, handling races with podman/mounts.
+
+        - Retries on EBUSY and ENOTEMPTY with extra cleanup.
+        - Final fallback: `rm -rf` via subprocess.
+        """
+        path = os.path.abspath(path)
+        logger.info("force_rmtree: cleaning %s", path)
+
+        for attempt in range(1, max_attempts + 1):
+            if not os.path.exists(path):
+                logger.info("force_rmtree: %s already gone (attempt %d)", path, attempt)
+                return True
+
+            try:
+                shutil.rmtree(path)
+                logger.info("force_rmtree: rmtree succeeded on attempt %d for %s",
+                            attempt, path)
+                return True
+            except OSError as e:
+                err = getattr(e, "errno", None)
+                logger.warning(
+                    "force_rmtree: attempt %d failed on %s: %s (errno=%s)",
+                    attempt, path, e, err
+                )
+
+                # Typical races: something still mounted or recreated in the dir
+                if err in (errno.EBUSY, errno.ENOTEMPTY):
+                    try:
+                        AsyncUpdater._umount_all_under(path, logger)
+                        AsyncUpdater._lazy_unmount_container_shm(logger)
+                    except Exception as ce:
+                        logger.warning("force_rmtree: cleanup helpers failed: %s", ce)
+
+                    # Backoff a bit before retrying
+                    time.sleep(1.0 * attempt)
+                    continue
+
+                # Any other errno: break out and go to rm -rf fallback
+                break
+
+        # Last resort: do what you did manually: rm -rf
+        try:
+            logger.warning("force_rmtree: using 'rm -rf %s' as last resort", path)
+            subprocess.run(["rm", "-rf", path], check=False)
+            if not os.path.exists(path):
+                logger.info("force_rmtree: rm -rf succeeded for %s", path)
+                return True
+            else:
+                logger.error("force_rmtree: rm -rf did not remove %s", path)
+        except Exception as e:
+            logger.error("force_rmtree: rm -rf failed for %s: %s", path, e)
+
+        return False
+
+    @staticmethod
     def _umount_all_under(root_path, logger):
         """
         Lazy-unmount any mountpoints that live at or beneath root_path.
@@ -577,17 +634,9 @@ class AsyncUpdater(object):
             full_path = os.path.join(PATH_APPS, container_name)
             self._umount_all_under(full_path, self.logger)
             if os.path.isdir(full_path):
-                try:
-                    shutil.rmtree(full_path)
-                except OSError as e:
-                    if e.errno == errno.EBUSY:
-                        self.logger.warning("rmtree busy on %s: %s; trying lazy shm unmount",
-                                        container_name, e)
-                        self._umount_all_under(full_path, self.logger)
-                        self._lazy_unmount_container_shm(self.logger)
-                        shutil.rmtree(full_path)
-                    else:
-                        raise
+                if not self._force_rmtree(full_path, self.logger):
+                    raise Exception(f"Failed to cleanup {full_path} before checkout")
+
             os.mkdir(PATH_APPS + '/' + container_name)
             self.logger.info("Create directory {}/{}".format(PATH_APPS, container_name))
             rootfs_fd = os.open(PATH_APPS + '/' + container_name, os.O_DIRECTORY)
