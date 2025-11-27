@@ -130,39 +130,78 @@ class AsyncUpdater(object):
         except subprocess.CalledProcessError as e:
             self.logger.error("Ostree rollback post-process commands failed ({})".format(str(e)))
             return False
-
     def init_ostree_remotes(self, ostree_remote_attributes):
         """
-        This method initializes the OSTree remote repositories (both OS repo and containers repo).
+        Initialize OSTree remotes (OS + containers) with optional TLS options.
 
-        :param dictionnary ostree_remote_attributes: Dictionnary containing the name, the url and whether the images are signed with GPG or not.
-        :returns: - True if the initialization is successful
-                  - False otherwise
-        :raises GLib.Error: Exception raised if OSTree remote repositories initialization fails.
+        :param dict ostree_remote_attributes:
+            {
+              'name': 'fullmetalupdate',
+              'url': 'https://ostreem1.mosaicone.cloud',
+              'gpg-verify': False,
+              'tls-ca-path': '/etc/.../ostree.crt',
+              'tls-client-cert-path': '/etc/.../device.crt',
+              'tls-client-key-path': '/etc/.../device.key',
+            }
         """
         res = True
         self.ostree_remote_attributes = ostree_remote_attributes
-        opts = GLib.Variant('a{sv}', {'gpg-verify': GLib.Variant('b', ostree_remote_attributes['gpg-verify'])})
+
+        # Base options
+        opts_dict = {
+            'gpg-verify': GLib.Variant('b', ostree_remote_attributes['gpg-verify']),
+        }
+
+        # Inject TLS settings if provided
+        ca  = ostree_remote_attributes.get('tls-ca-path')
+        cli = ostree_remote_attributes.get('tls-client-cert-path')
+        key = ostree_remote_attributes.get('tls-client-key-path')
+
+        if ca:
+            opts_dict['tls-ca-path'] = GLib.Variant('s', ca)
+        if cli:
+            opts_dict['tls-client-cert-path'] = GLib.Variant('s', cli)
+        if key:
+            opts_dict['tls-client-key-path'] = GLib.Variant('s', key)
+
+        opts = GLib.Variant('a{sv}', opts_dict)
+
         try:
-            self.logger.info("Initalize remotes for the OS ostree: {}".format(ostree_remote_attributes['name']))
-            if not ostree_remote_attributes['name'] in self.repo_os.remote_list():
-                self.repo_os.remote_add(ostree_remote_attributes['name'],
-                                        ostree_remote_attributes['url'],
-                                        opts, None)
-            self.remote_name_os = ostree_remote_attributes['name']
+            # ---------------- OS remote ----------------
+            os_remote = ostree_remote_attributes['name']
+            os_url    = ostree_remote_attributes['url']
 
-            # [_, refs] = self.repo_containers.list_refs(None, None)
+            self.logger.info("Initalize remotes for the OS ostree: %s", os_remote)
 
-            remote_name = "mad-matisse-gen3-containers"
-            self.logger.info("Initalize remotes for the containers ostree: {}".format(remote_name))
-            if remote_name not in self.repo_containers.remote_list():
-                self.logger.info("We had the remote: {}".format(remote_name))
-                self.repo_containers.remote_add(remote_name,
-                                                ostree_remote_attributes['url'],
-                                                opts, None)
+            if os_remote in self.repo_os.remote_list():
+                self.logger.info(
+                    "OS remote %s already exists, deleting and re-adding with TLS options",
+                    os_remote
+                )
+                self.repo_os.remote_delete(os_remote, None)
+
+            self.repo_os.remote_add(os_remote, os_url, opts, None)
+            self.remote_name_os = os_remote
+
+            # ---------------- containers remote ----------------
+            remote_name    = "mad-matisse-gen3-containers"
+            containers_url = ostree_remote_attributes['url']
+
+            self.logger.info(
+                "Initalize remotes for the containers ostree: %s", remote_name
+            )
+
+            if remote_name in self.repo_containers.remote_list():
+                self.logger.info(
+                    "Containers remote %s already exists, deleting and re-adding",
+                    remote_name
+                )
+                self.repo_containers.remote_delete(remote_name, None)
+
+            self.repo_containers.remote_add(remote_name, containers_url, opts, None)
 
         except GLib.Error as e:
-            self.logger.error("OSTRee remote initialization failed ({})".format(str(e)))
+            self.logger.error("OSTRee remote initialization failed (%s)", str(e))
             res = False
 
         return res
