@@ -208,22 +208,42 @@ class AsyncUpdater(object):
 
     def set_current_revision(self, container_name, rev):
         """
-        This method writes rev into a json file containing the current working rev for the containers.
+        Remember the currently working revision of a container.
+
+        This writes the revision to the JSON tracking file used for rollback
+        and also updates the local OSTree ref so that tools like `ostree log`
+        and sysinfo see the new commit as HEAD.
 
         :param string container_name: Name of the container.
-        :param string rev: Revision to write in json file.
-        :raises FileNotFoundError: Exception raised if json file needs to be created.
+        :param string rev: Revision to write in json file and set as local ref.
         """
+        rev = rev.strip()
+
+        # First update the JSON used by rollback logic
         try:
-            with open(PATH_CURRENT_REVISIONS, "r") as f:
-                current_revs = json.load(f)
-            current_revs.update({container_name: rev})
+            try:
+                with open(PATH_CURRENT_REVISIONS, "r") as f:
+                    current_revs = json.load(f)
+            except FileNotFoundError:
+                current_revs = {}
+
+            current_revs[container_name] = rev
             with open(PATH_CURRENT_REVISIONS, "w") as f:
                 json.dump(current_revs, f, indent=4)
-        except FileNotFoundError:
-            with open(PATH_CURRENT_REVISIONS, "w") as f:
-                current_revs = {container_name: rev}
-                json.dump(current_revs, f, indent=4)
+        except Exception as e:
+            self.logger.error(
+                "Failed to write current_revs.json for %s: %s",
+                container_name, e
+            )
+
+        # Then move the local OSTree ref for this container to the new rev
+        try:
+            self.update_container_ref(container_name, rev)
+        except Exception as e:
+            self.logger.error(
+                "Failed to update container ref for %s to %s: %s",
+                container_name, rev, e
+            )
 
     def get_previous_rev(self, container_name):
         """
@@ -299,13 +319,19 @@ class AsyncUpdater(object):
             self.disable_watcher()
             self.disable_podman()
 
-            for ref in refs:
-                container_name = ref.split(':')[1]
-                if not os.path.isfile(PATH_APPS + '/' + container_name + '/' + VALIDATE_CHECKOUT):
-                    self.checkout_container(container_name, None)
+            for ref_name, rev in refs.items():
+                container_name = ref_name.split(':')[1] if ':' in ref_name else ref_name
+                validate_path = os.path.join(PATH_APPS, container_name, VALIDATE_CHECKOUT)
+
+                if not os.path.isfile(validate_path):
+                    # Checkout the container to the known revision from the repo.
+                    # checkout_container() will also record the current revision
+                    # (JSON + OSTree ref) via set_current_revision().
+                    self.checkout_container(container_name, rev)
                     self.update_container_ids(container_name)
+
                     # Prashant to add the whiteout file creation step here
-                    store_dir = os.path.join(PATH_APPS + '/' + container_name)
+                    store_dir = os.path.join(PATH_APPS, container_name)
                     whiteout_dir = os.path.join(PATH_APPS, ".whiteout-metadata")
                     self.create_whiteouts(store_dir, whiteout_dir)
                 if not res:
@@ -319,8 +345,8 @@ class AsyncUpdater(object):
             self.enable_watcher()
             self.enable_podman()
 
-            for ref in refs:
-                container_name = ref.split(':')[1]
+            for ref_name in refs:
+                container_name = ref_name.split(':')[1] if ':' in ref_name else ref_name
                 if os.path.isfile(PATH_APPS + '/' + container_name + '/' + FILE_AUTOSTART):
                     self.start_unit(container_name)
         except (GLib.Error, Exception) as e:
@@ -493,6 +519,109 @@ class AsyncUpdater(object):
             for fname in filenames:
                 os.lchown(os.path.join(dirpath, fname), CONTAINER_UID, CONTAINER_GID)
 
+    def update_container_ref(self, container_name, rev):
+        """
+        Update the OSTree remote ref for a container so that
+        'ostree log <remote>:<branch>' shows the latest commit.
+        For our setup the remote and branch are both the container name, e.g.
+        remote: 'mad-matisse-gen3-containers'
+        branch: 'mad-matisse-gen3-containers'
+        full ref: 'mad-matisse-gen3-containers:mad-matisse-gen3-containers'
+        """
+        remote = container_name
+        branch = container_name
+        ref_display = f"{remote}:{branch}"
+        try:
+            self.logger.info(
+                "Updating container remote ref %s to %s in %s",
+                ref_display, rev, PATH_REPO_APPS
+            )
+            try:
+                # Update the REMOTE ref (refs/remotes/<remote>/<branch>)
+                self.repo_containers.set_ref_immediate(
+                    remote,   # remote name
+                    branch,   # branch name
+                    rev,
+                    None
+                )
+
+            except AttributeError:
+                # Fallback if set_ref_immediate is not in the bindings
+                self.logger.info(
+                    "set_ref_immediate not available, using transaction_set_ref "
+                    "for %s -> %s", ref_display, rev
+                )
+                self.repo_containers.prepare_transaction(None, None)
+                self.repo_containers.transaction_set_ref(remote, branch, rev)
+                self.repo_containers.commit_transaction(None, None)
+            # Sanity check: resolve the ref and log what it points to now
+            try:
+                _, new_csum = self.repo_containers.resolve_rev(ref_display, False)
+                self.logger.info(
+                    "Container ref %s now points to %s",
+                    ref_display, new_csum
+                )
+            except Exception as e:
+                self.logger.warning(
+                    "Could not resolve ref %s after update: %s",
+                    ref_display, e
+                )
+
+        except Exception as e:
+            self.logger.error("Failed to update container ref %s: %s", container_name, e)
+
+    def update_os_ref(self, new_rev):
+        """
+        Update the local OS ref so that 'ostree log <os-ref>' shows the new commit.
+        We find the ref whose commit matches the *currently booted* deployment,
+        and then move that ref to the new revision.
+        """
+        try:
+            booted_dep = self.sysroot.get_booted_deployment()
+            if booted_dep is None:
+                self.logger.warning("No booted deployment found, cannot update OS ref")
+                return
+            current_csum = booted_dep.get_csum()
+
+            # refs is a dict: { refname: checksum }
+            [_, refs] = self.repo_os.list_refs(None, None)
+            os_ref = None
+            for ref_name, csum in refs.items():
+                if csum == current_csum:
+                    os_ref = ref_name
+                    break
+            if os_ref is None:
+                self.logger.warning(
+                    "Could not find OS ref matching booted checksum %s; "
+                    "not updating OS ref", current_csum
+                )
+                return
+
+            self.logger.info(
+                "Updating OS ref %s from %s to %s",
+                os_ref, current_csum, new_rev
+            )
+
+            try:
+                self.repo_os.set_ref_immediate(
+                    None,   # local ref
+                    os_ref,
+                    new_rev,
+                    None
+                )
+            except AttributeError:
+                # Fallback to transaction API
+                self.logger.info(
+                    "set_ref_immediate not available, using transaction_set_ref "
+                    "for %s -> %s", os_ref, new_rev
+                )
+                self.repo_os.prepare_transaction(None, None)
+                self.repo_os.transaction_set_ref(None, os_ref, new_rev)
+                self.repo_os.commit_transaction(None, None)
+
+        except Exception as e:
+            self.logger.error("Failed to update OS ref to %s: %s", new_rev, e)
+
     def handle_container(self, container_name, autostart, autoremove):
         """
         This method will handle the container execution or deletion based on the autostart
@@ -647,6 +776,10 @@ class AsyncUpdater(object):
 
         :param string container_name: Name of the container.
         :param string rev_number: Commit revision.
+
+        It also records the checked out revision as the current working
+        revision (JSON + OSTree ref), so that tools like sysinfo and
+        'ostree log' see the new commit as HEAD.
         """
         service = self.systemd.ListUnitsByNames([container_name + '.service'])
         if service[0][2] != 'not-found':
@@ -655,6 +788,8 @@ class AsyncUpdater(object):
         self._stop_stack_gracefully(container_name, self.logger, PATH_APPS)
         res = True
         rootfs_fd = None
+        rev = None
+
         try:
             options = OSTree.RepoCheckoutAtOptions()
             options.overwrite_mode = OSTree.RepoCheckoutOverwriteMode.UNION_IDENTICAL
@@ -666,7 +801,7 @@ class AsyncUpdater(object):
             self.logger.info("Getting rev from repo:{}".format(container_name + ':' + container_name))
 
             if rev_number is None:
-                rev = self.repo_containers.resolve_rev(container_name + ':' + container_name, False)[1]
+                _,rev = self.repo_containers.resolve_rev(container_name + ':' + container_name, False)[1]
             else:
                 rev = rev_number
             self.logger.info("Rev value:{}".format(rev))
@@ -676,19 +811,29 @@ class AsyncUpdater(object):
                 if not self._force_rmtree(full_path, self.logger):
                     raise Exception(f"Failed to cleanup {full_path} before checkout")
 
-            os.mkdir(PATH_APPS + '/' + container_name)
+            os.mkdir(full_path)
             self.logger.info("Create directory {}/{}".format(PATH_APPS, container_name))
-            rootfs_fd = os.open(PATH_APPS + '/' + container_name, os.O_DIRECTORY)
-            res = self.repo_containers.checkout_at(options, rootfs_fd, PATH_APPS + '/' + container_name, rev)
-            open(PATH_APPS + '/' + container_name + '/' + VALIDATE_CHECKOUT, 'a').close()
+            rootfs_fd = os.open(full_path, os.O_DIRECTORY)
+            res = self.repo_containers.checkout_at(options, rootfs_fd, full_path, rev)
+            # Mark that this directory has been successfully checked out
+            open(os.path.join(full_path, VALIDATE_CHECKOUT), 'a').close()
+            # *** NEW: remember this revision as the current working one ***
+            try:
+                self.set_current_revision(container_name, rev)
+            except Exception as e:
+                self.logger.error(
+                    "Failed to record current revision %s for %s: %s",
+                    rev, container_name, e
+                )
 
         except GLib.Error as e:
             self.logger.error("Checking out {} failed ({})".format(container_name, str(e)))
             raise
-        if rootfs_fd is not None:
-            os.close(rootfs_fd)
+        finally:
+            if rootfs_fd is not None:
+                os.close(rootfs_fd)
         if not res:
-            raise Exception("Checking out {} failed (returned False)")
+            raise Exception("Checking out {} failed (returned False)".format(container_name))
 
     def ostree_stage_tree(self, rev_number):
         """
