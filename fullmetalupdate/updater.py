@@ -27,36 +27,91 @@ CONTAINER_GID = 1000
 OSTREE_DEPTH = 1
 
 
+class _DevSystemd:
+    def ListUnitsByNames(self, names):
+        return [(name, "", "not-found", "", "", "", "", "", "", "") for name in names]
+
+    def Reload(self):
+        return None
+
+    def EnableUnitFiles(self, *args, **kwargs):
+        return None
+
+    def DisableUnitFiles(self, *args, **kwargs):
+        return None
+
+    def StartUnit(self, *args, **kwargs):
+        return None
+
+    def StopUnit(self, *args, **kwargs):
+        return None
+
+
 class DBUSException(Exception):
     pass
 
 
 class AsyncUpdater(object):
-    def __init__(self):
+    def __init__(self, dev_mode=False, dev_state_dir=None):
         self.ostree_remote_attributes = None
         self.logger = logging.getLogger('fullmetalupdate_container_updater')
+        self.dev_mode = dev_mode
 
-        self.mark_os_successful()
+        if self.dev_mode:
+            self._configure_dev_paths(dev_state_dir)
+            self.logger.warning("Running in dev mode; hardware/systemd/OSTree sysroot actions are mocked")
+        else:
+            self.mark_os_successful()
 
-        bus = SystemBus()
-        self.systemd = bus.get('.systemd1')
+        if self.dev_mode:
+            self.systemd = _DevSystemd()
+        else:
+            bus = SystemBus()
+            self.systemd = bus.get('.systemd1')
 
-        self.sysroot = OSTree.Sysroot.new_default()
-        self.sysroot.load(None)
-        self.logger.info("Cleaning the sysroot")
-        self.sysroot.cleanup(None)
+        if self.dev_mode:
+            self.sysroot = None
+            self.repo_os = self._open_or_create_repo(PATH_REPO_OS)
+        else:
+            self.sysroot = OSTree.Sysroot.new_default()
+            self.sysroot.load(None)
+            self.logger.info("Cleaning the sysroot")
+            self.sysroot.cleanup(None)
 
-        [_, repo] = self.sysroot.get_repo()
-        self.repo_os = repo
+            [_, repo] = self.sysroot.get_repo()
+            self.repo_os = repo
 
         self.remote_name_os = None
-        self.repo_containers = OSTree.Repo.new(Gio.File.new_for_path(PATH_REPO_APPS))
-        if os.path.exists(PATH_REPO_APPS):
-            self.logger.info("Preinstalled OSTree for containers, we use it")
-            self.repo_containers.open(None)
+        self.repo_containers = self._open_or_create_repo(PATH_REPO_APPS)
+
+    def _configure_dev_paths(self, dev_state_dir):
+        global PATH_APPS, PATH_REPO_OS, PATH_REPO_APPS
+        global PATH_SYSTEMD_UNITS, PATH_CURRENT_REVISIONS
+
+        if not dev_state_dir:
+            dev_state_dir = os.path.join(os.getcwd(), ".fmu-dev")
+
+        dev_state_dir = os.path.abspath(dev_state_dir)
+        PATH_APPS = os.path.join(dev_state_dir, "apps")
+        PATH_REPO_OS = os.path.join(dev_state_dir, "ostree", "repo")
+        PATH_REPO_APPS = os.path.join(PATH_APPS, "ostree_repo")
+        PATH_SYSTEMD_UNITS = os.path.join(dev_state_dir, "systemd")
+        PATH_CURRENT_REVISIONS = os.path.join(dev_state_dir, "current_revs.json")
+
+        os.makedirs(PATH_APPS, exist_ok=True)
+        os.makedirs(os.path.dirname(PATH_REPO_OS), exist_ok=True)
+        os.makedirs(PATH_SYSTEMD_UNITS, exist_ok=True)
+        os.makedirs(os.path.dirname(PATH_CURRENT_REVISIONS), exist_ok=True)
+
+    def _open_or_create_repo(self, path):
+        repo = OSTree.Repo.new(Gio.File.new_for_path(path))
+        if os.path.exists(path):
+            self.logger.info("Using OSTree repo: %s", path)
+            repo.open(None)
         else:
-            self.logger.info("No preinstalled OSTree for containers, we create one")
-            self.repo_containers.create(OSTree.RepoMode.ARCHIVE_Z2, None)
+            self.logger.info("Creating OSTree repo: %s", path)
+            repo.create(OSTree.RepoMode.ARCHIVE_Z2, None)
+        return repo
 
     def mark_os_successful(self):
         try:

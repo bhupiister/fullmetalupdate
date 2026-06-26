@@ -29,8 +29,12 @@ class DeploymentBaseAction(object):
         self.action_id = action_id
 
     async def __call__(self, resource=None):
+        query_params = {}
+        if resource is not None:
+            query_params['c'] = resource
+
         return await self.ddi.get_resource(
-            '/{tenant}/controller/v1/{controllerId}/deploymentBase/{actionId}', {'c': resource}, actionId=self.action_id)
+            '/{tenant}/controller/v1/{controllerId}/deploymentBase/{actionId}', query_params, actionId=self.action_id)
 
     async def feedback(self, status_execution, status_result,
                        status_details=(), **kwstatus_result_progress):

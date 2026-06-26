@@ -10,8 +10,11 @@ from threading import Lock, Thread
 import socket as s
 import subprocess
 import asyncio
-import gi
+import shutil
+from urllib.parse import parse_qs, urlparse
+import async_timeout
 
+import fullmetalupdate.updater as updater_paths
 from fullmetalupdate.updater import AsyncUpdater
 from rauc_hawkbit.ddi.client import DDIClient, APIError
 from rauc_hawkbit.ddi.client import (
@@ -24,6 +27,59 @@ from aiohttp.client_exceptions import ClientOSError, ClientResponseError
 
 PATH_REBOOT_DATA = '/var/local/fullmetalupdate/reboot_data.json'
 DIR_NOTIFY_SOCKET = '/tmp/fullmetalupdate/'
+
+
+class HawkbitManagementClient(object):
+    def __init__(self, session, host, ssl, bearer_token, timeout=10):
+        self.session = session
+        self.host = host
+        self.ssl = ssl
+        self.bearer_token = bearer_token
+        self.timeout = timeout
+        self.logger = logging.getLogger('fullmetalupdate_hawkbit')
+
+    def build_api_url(self, api_path):
+        if api_path.startswith('http://') or api_path.startswith('https://'):
+            return api_path
+
+        protocol = 'https' if self.ssl else 'http'
+        return '{protocol}://{host}/{api_path}'.format(
+            protocol=protocol, host=self.host, api_path=api_path.lstrip('/'))
+
+    def _headers(self):
+        return {
+            'Accept': 'application/json',
+            'Authorization': 'Bearer {}'.format(self.bearer_token),
+        }
+
+    async def get_resource(self, api_path):
+        url = self.build_api_url(api_path)
+        self.logger.debug('Management API GET {}'.format(url))
+
+        with async_timeout.timeout(self.timeout):
+            async with self.session.get(url, headers=self._headers()) as resp:
+                if resp.status != 200:
+                    error_description = await resp.text()
+                    if error_description:
+                        self.logger.debug('Management API error: {}'.format(error_description))
+                    raise APIError('Management API {status}: {reason}'.format(
+                        status=resp.status, reason=resp.reason))
+
+                return await resp.json()
+
+    async def get_distribution_set_metadata(self, target_id, action_id):
+        action = await self.get_resource(
+            '/rest/v1/targets/{targetId}/actions/{actionId}'.format(
+                targetId=target_id,
+                actionId=action_id))
+
+        distributionset = action.get('_links', {}).get('distributionset')
+        if not distributionset or 'href' not in distributionset:
+            raise APIError('Management API action has no distributionset link')
+
+        metadata_href = distributionset['href'].rstrip('/').lstrip('http:') + '/metadata?offset=0&limit=100'
+        metadata = await self.get_resource(metadata_href)
+        return metadata.get('content', [])
 
 
 class FullMetalUpdateDDIClient(AsyncUpdater):
@@ -41,15 +97,21 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
         from feedback threads). 
     """
 
-    def __init__(self, session, host, ssl, tenant_id, target_name, auth_token, attributes):
+    def __init__(self, session, host, ssl, tenant_id, target_name, auth_token,
+                 attributes, dev_mode=False, dev_state_dir=None,
+                 management_client=None):
         """ Constructor of FullMetalUpdateDDIClient Class.
         """
-        super(FullMetalUpdateDDIClient, self).__init__()
+        if dev_mode:
+            self._configure_client_dev_paths(dev_state_dir)
+
+        super(FullMetalUpdateDDIClient, self).__init__(dev_mode, dev_state_dir)
 
         self.attributes = attributes
 
         self.logger = logging.getLogger('fullmetalupdate_hawkbit')
         self.ddi = DDIClient(session, host, ssl, auth_token, tenant_id, target_name)
+        self.management = management_client
         self.action_id = None
         self.feedbackThreads = []
         self.feedbackResults = None
@@ -57,6 +119,65 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
 
         os.makedirs(os.path.dirname(PATH_REBOOT_DATA), exist_ok=True)
         os.makedirs(DIR_NOTIFY_SOCKET, exist_ok=True)
+
+    def _configure_client_dev_paths(self, dev_state_dir):
+        global PATH_REBOOT_DATA, DIR_NOTIFY_SOCKET
+
+        if not dev_state_dir:
+            dev_state_dir = os.path.join(os.getcwd(), ".fmu-dev")
+
+        dev_state_dir = os.path.abspath(dev_state_dir)
+        PATH_REBOOT_DATA = os.path.join(dev_state_dir, "reboot_data.json")
+        DIR_NOTIFY_SOCKET = os.path.join(dev_state_dir, "notify")
+
+    def _parse_update_info(self, value):
+        if isinstance(value, str):
+            self.logger.debug("Raw update info metadata: %r", value)
+            info = json.loads(value, parse_float=float, parse_int=int)
+        elif isinstance(value, (dict, list)):
+            self.logger.debug("Update info metadata is already parsed: %r", value)
+            info = value
+        else:
+            raise TypeError("Unsupported update info metadata type: {}".format(type(value).__name__))
+
+        self.logger.debug("Parsed update info metadata: %r", info)
+        return info
+
+    async def _get_distribution_set_info(self, action_id):
+        if not self.management:
+            return None
+
+        metadata = await self.management.get_distribution_set_metadata(
+            self.ddi.controller_id,
+            action_id)
+
+        for entry in metadata:
+            if entry.get('key') == 'info':
+                self.logger.info("Using Distribution Set metadata 'info'")
+                return self._parse_update_info(entry.get('value'))
+
+        return None
+
+    def _check_apps_partition_space_mb(self):
+        apps_path = updater_paths.PATH_APPS
+        # apps_path = '/apps'
+
+        try:
+            disk_usage = shutil.disk_usage(apps_path)
+        except FileNotFoundError:
+            self.logger.error("Cannot check free space: app partition path {} does not exist".format(apps_path))
+            return 0
+        except OSError as e:
+            self.logger.error("Cannot check free space on app partition {}: {}".format(apps_path, e))
+            return 0
+
+        free_space_mb = disk_usage.free / 1024 / 1024
+        self.logger.info(
+            "App partition free space: %.2f MB available",
+            free_space_mb
+        )
+
+        return free_space_mb
 
     async def start_polling(self, wait_on_error=60):
         """ 
@@ -142,8 +263,11 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
 
         # retrieve action id and resource parameter from URL
         deployment = base['_links']['deploymentBase']['href']
-        match = re.search('/deploymentBase/(.+)\?c=(.+)$', deployment)
-        action_id, resource = match.groups()
+        match = re.search(r'/deploymentBase/([^/?]+)', deployment)
+        if not match:
+            raise APIError("Invalid deploymentBase href: {}".format(deployment))
+        action_id = match.group(1)
+        resource = parse_qs(urlparse(deployment).query).get('c', [None])[0]
         # fetch deployment information
         deploy_info = await self.ddi.deploymentBase[action_id](resource)
         reboot_needed = False
@@ -170,6 +294,41 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
 
         seq = ('name', 'version', 'rev', 'part', 'autostart', 'autoremove', 'status_execution', 'status_update', 'status_result', 'notify', 'timeout')
         updates = []
+        distribution_set_info = None
+
+        try:
+            distribution_set_info = await self._get_distribution_set_info(action_id)
+        except Exception as e:
+            self.logger.warning(
+                "Failed to read Distribution Set metadata info via Management API; "
+                "falling back to chunk metadata: {}".format(e))
+
+        ds_info_apps: list[dict] = (distribution_set_info or {}).get('apps', [])
+        print("ds_info_apps: {}".format(ds_info_apps))
+
+        try:
+            update_total_size_mb = float((distribution_set_info or {}).get('totalSizeMB', 0))
+        except (TypeError, ValueError):
+            self.logger.error(
+                "Invalid totalSizeMB metadata value: {}".format(
+                    (distribution_set_info or {}).get('totalSizeMB', 0)))
+            update_total_size_mb = 0
+
+        if update_total_size_mb != 0:
+            free_space_mb = self._check_apps_partition_space_mb()
+            if free_space_mb < update_total_size_mb:
+                msg = "Not enough free space on app partition {}: {:.2f} MB available, {:.2f} MB required".format(
+                    updater_paths.PATH_APPS,
+                    free_space_mb,
+                    update_total_size_mb
+                )
+                self.logger.error(msg)
+                await self.ddi.deploymentBase[self.action_id].feedback(
+                    DeploymentStatusExecution.closed,
+                    DeploymentStatusResult.failure,
+                    [msg])
+                self.action_id = None
+                return
 
         # Update process
         for chunk in deploy_info['deployment']['chunks']:
