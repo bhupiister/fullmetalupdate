@@ -27,6 +27,7 @@ from aiohttp.client_exceptions import ClientOSError, ClientResponseError
 
 PATH_REBOOT_DATA = '/var/local/fullmetalupdate/reboot_data.json'
 DIR_NOTIFY_SOCKET = '/tmp/fullmetalupdate/'
+UPDATE_GAP_PERCENT = 10
 
 
 class HawkbitManagementClient(object):
@@ -316,7 +317,7 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
 
         if update_total_size_mb != 0:
             free_space_mb = self._check_apps_partition_space_mb()
-            if free_space_mb < update_total_size_mb:
+            if free_space_mb < update_total_size_mb * (100 + UPDATE_GAP_PERCENT) / 100:
                 msg = "Not enough free space on app partition {}: {:.2f} MB available, {:.2f} MB required".format(
                     updater_paths.PATH_APPS,
                     free_space_mb,
