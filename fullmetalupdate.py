@@ -9,7 +9,10 @@ import asyncio
 import aiohttp
 import ssl
 from distutils.util import strtobool
-from fullmetalupdate.fullmetalupdate_ddi_client import FullMetalUpdateDDIClient
+from fullmetalupdate.fullmetalupdate_ddi_client import (
+    FullMetalUpdateDDIClient,
+    HawkbitManagementClient,
+)
 
 
 class _GatewayAuthSession:
@@ -114,15 +117,20 @@ async def main():
 
     ATTRIBUTES = {"FullMetalUpdate": config.get("client", "hawkbit_target_name")}
 
+    DEV_MODE = config.getboolean("dev", "enabled", fallback=False)
+    DEV_STATE_DIR = config.get("dev", "state_dir", fallback=None)
+    if DEV_STATE_DIR:
+        dev_state_path = Path(DEV_STATE_DIR)
+        if not dev_state_path.is_absolute():
+            dev_state_path = cfg_path.parent / dev_state_path
+        DEV_STATE_DIR = str(dev_state_path)
+
     # Prefer Gateway token; fall back to auth_token only if no gateway token
     try:
         GW_TOKEN = config.get("client", "hawkbit_gateway_token")
     except Exception:
         GW_TOKEN = ""
-    try:
-        AUTH_TOKEN_CFG = config.get("client", "hawkbit_auth_token")
-    except Exception:
-        AUTH_TOKEN_CFG = None
+    AUTH_TOKEN_CFG = config.get("client", "hawkbit_auth_token")
 
     # mTLS-related paths from config
     hawkbit_ca_cert = config.get("client", "hawkbit_ca_cert", fallback=None)
@@ -198,6 +206,13 @@ async def main():
             # Fall back to old behavior with hawkbit_auth_token (may be None)
             AUTH_TOKEN = AUTH_TOKEN_CFG
 
+        management_client = HawkbitManagementClient(
+            real_session,
+            HOST,
+            SSL,
+            AUTH_TOKEN_CFG,
+        )
+
         client = FullMetalUpdateDDIClient(
             session_for_ddi,
             HOST,
@@ -206,6 +221,9 @@ async def main():
             TARGET_NAME,
             AUTH_TOKEN,
             ATTRIBUTES,
+            DEV_MODE,
+            DEV_STATE_DIR,
+            management_client,
         )
 
         if not client.init_checkout_existing_containers():

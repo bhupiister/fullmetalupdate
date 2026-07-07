@@ -9,8 +9,10 @@
 *.egg
 *.egg-info
 /venv*
+/.venv
 /build
 /doc/.build
 /doc/modules
 /.coverage
 /dist
+.idea/
