@@ -68,7 +68,7 @@ class HawkbitManagementClient(object):
 
                 return await resp.json()
 
-    async def get_distribution_set_metadata(self, target_id, action_id):
+    async def get_distribution_set_id(self, target_id, action_id):
         action = await self.get_resource(
             '/rest/v1/targets/{targetId}/actions/{actionId}'.format(
                 targetId=target_id,
@@ -78,8 +78,21 @@ class HawkbitManagementClient(object):
         if not distributionset or 'href' not in distributionset:
             raise APIError('Management API action has no distributionset link')
 
-        metadata_href = distributionset['href'].rstrip('/').lstrip('http:') + '/metadata?offset=0&limit=100'
-        metadata = await self.get_resource(metadata_href)
+        distribution_set_id = urlparse(distributionset['href']).path.rstrip('/').rsplit('/', 1)[-1]
+        if not distribution_set_id:
+            raise APIError('Management API action has an invalid distributionset link')
+
+        return distribution_set_id
+
+    async def get_distribution_set(self, distribution_set_id):
+        return await self.get_resource(
+            '/rest/v1/distributionsets/{distributionSetId}'.format(
+                distributionSetId=distribution_set_id))
+
+    async def get_distribution_set_metadata(self, distribution_set_id):
+        metadata = await self.get_resource(
+            '/rest/v1/distributionsets/{distributionSetId}/metadata?offset=0&limit=100'.format(
+                distributionSetId=distribution_set_id))
         return metadata.get('content', [])
 
 
@@ -144,13 +157,11 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
         self.logger.debug("Parsed update info metadata: %r", info)
         return info
 
-    async def _get_distribution_set_info(self, action_id):
+    async def _get_distribution_set_info(self, distribution_set_id):
         if not self.management:
             return None
 
-        metadata = await self.management.get_distribution_set_metadata(
-            self.ddi.controller_id,
-            action_id)
+        metadata = await self.management.get_distribution_set_metadata(distribution_set_id)
 
         for entry in metadata:
             if entry.get('key') == 'info':
@@ -159,22 +170,20 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
 
         return None
 
-    def _check_apps_partition_space_mb(self):
-        apps_path = updater_paths.PATH_APPS
-        # apps_path = '/apps'
-
+    def _check_partition_space_mb(self, partition_path):
         try:
-            disk_usage = shutil.disk_usage(apps_path)
+            disk_usage = shutil.disk_usage(partition_path)
         except FileNotFoundError:
-            self.logger.error("Cannot check free space: app partition path {} does not exist".format(apps_path))
+            self.logger.error("Cannot check free space: partition path {} does not exist".format(partition_path))
             return 0
         except OSError as e:
-            self.logger.error("Cannot check free space on app partition {}: {}".format(apps_path, e))
+            self.logger.error("Cannot check free space on partition {}: {}".format(partition_path, e))
             return 0
 
         free_space_mb = disk_usage.free / 1024 / 1024
         self.logger.info(
-            "App partition free space: %.2f MB available",
+            "Partition %s free space: %.2f MB available",
+            partition_path,
             free_space_mb
         )
 
@@ -295,17 +304,27 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
 
         seq = ('name', 'version', 'rev', 'part', 'autostart', 'autoremove', 'status_execution', 'status_update', 'status_result', 'notify', 'timeout')
         updates = []
+        distribution_set = None
         distribution_set_info = None
 
         try:
-            distribution_set_info = await self._get_distribution_set_info(action_id)
+            distribution_set_id = await self.management.get_distribution_set_id(
+                self.ddi.controller_id,
+                action_id)
+            distribution_set = await self.management.get_distribution_set(
+                distribution_set_id)
+            distribution_set_info = await self._get_distribution_set_info(
+                distribution_set_id)
         except Exception as e:
             self.logger.warning(
                 "Failed to read Distribution Set metadata info via Management API; "
                 "falling back to chunk metadata: {}".format(e))
 
-        ds_info_apps: list[dict] = (distribution_set_info or {}).get('apps', [])
-        print("ds_info_apps: {}".format(ds_info_apps))
+        update_type = distribution_set.get('type', '')
+        partition_to_check = {
+            'app': updater_paths.PATH_APPS,
+            'os': updater_paths.PATH_OS,
+        }.get(update_type)
 
         try:
             update_total_size_mb = float((distribution_set_info or {}).get('totalSizeMB', 0))
@@ -315,11 +334,11 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
                     (distribution_set_info or {}).get('totalSizeMB', 0)))
             update_total_size_mb = 0
 
-        if update_total_size_mb != 0:
-            free_space_mb = self._check_apps_partition_space_mb()
+        if update_total_size_mb and partition_to_check is not None:
+            free_space_mb = self._check_partition_space_mb(partition_to_check)
             if free_space_mb < update_total_size_mb * (100 + UPDATE_GAP_PERCENT) / 100:
                 msg = "Not enough free space on app partition {}: {:.2f} MB available, {:.2f} MB required".format(
-                    updater_paths.PATH_APPS,
+                    partition_to_check,
                     free_space_mb,
                     update_total_size_mb
                 )
