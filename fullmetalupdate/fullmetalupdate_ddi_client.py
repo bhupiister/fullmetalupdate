@@ -27,7 +27,6 @@ from aiohttp.client_exceptions import ClientOSError, ClientResponseError
 
 PATH_REBOOT_DATA = '/var/local/fullmetalupdate/reboot_data.json'
 DIR_NOTIFY_SOCKET = '/tmp/fullmetalupdate/'
-PATH_OS_RELEASE = '/etc/os-release'
 UPDATE_GAP_PERCENT = 10
 
 
@@ -185,26 +184,36 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
         PATH_REBOOT_DATA = os.path.join(dev_state_dir, "reboot_data.json")
         DIR_NOTIFY_SOCKET = os.path.join(dev_state_dir, "notify")
 
-    def _get_os_version_id(self):
+    def _get_installed_update_versions(self):
+        versions = {
+            'os_version': None,
+            'apps_version': None,
+        }
+
         try:
-            with open(PATH_OS_RELEASE, 'r', encoding='utf-8') as os_release:
-                for line in os_release:
-                    key, separator, value = line.partition('=')
-                    if separator and key.strip() == 'VERSION_ID':
-                        value = value.strip()
-                        if (len(value) >= 2 and value[0] == value[-1]
-                                and value[0] in ('"', "'")):
-                            value = value[1:-1]
-                        return value
-        except OSError as e:
+            result = subprocess.run(
+                ['sysinfo'],
+                check=True,
+                capture_output=True,
+                text=True)
+        except (OSError, subprocess.CalledProcessError) as e:
             self.logger.error(
-                "Cannot read OS release file {}: {}".format(PATH_OS_RELEASE, e))
+                "Cannot read installed update versions using sysinfo: {}".format(
+                    e))
+            return versions
 
-        return None
+        version_labels = {
+            'Build Version:': 'os_version',
+            'Apps Version:': 'apps_version',
+        }
 
-    def _get_app_version_id(self):
-        # TODO detect current apps package version
-        return "01.36.0"
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            for label, key in version_labels.items():
+                if line.startswith(label) and versions[key] is None:
+                    versions[key] = line[len(label):].strip() or None
+
+        return versions
 
     def _parse_update_info(self, value):
         if isinstance(value, str):
@@ -431,13 +440,11 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
                 parsed_info = self._parse_update_info(metadata['info'])
                 item['distribution_set_info'] = parsed_info
 
-        current_ds_version = (
-            self._get_os_version_id()
-            if update_type == 'os'
-            else self._get_app_version_id()
-            if update_type == 'app'
-            else None
-        )
+        installed_update_versions = self._get_installed_update_versions()
+        current_ds_version = {
+            'os': installed_update_versions.get('os_version'),
+            'app': installed_update_versions.get('apps_version'),
+        }.get(update_type)
 
         target_ds_version = (
             distribution_set.get('version')
