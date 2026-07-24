@@ -335,61 +335,14 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
             CancelStatusResult.success,
             status_details=("Cancelling not supported",))
 
-    async def process_deployment(self, base):
+    async def collect_free_space_requirements(self, action_id):
         """
-        This method performs a Hawkbit update in several steps :
-            - Retrieves information about the Hawkbit update based on base dictionnary ;
-            - Notifies Hawkbit server about the appropriate start of the update ;
-            - All chunks are then parsed and processed, ie 
-                1) OS chunks cause a system update (see update_system method) and a system reboot ;
-                2) Apps chunks cause apps updates (see update_container method). An app / container that implements the notify feature of systemd is 
-                    associated with a feedback thread, which monitors its execution and feedbacks the FMU client if the app succesfully started or not;
-            - Systemd dependency tree is regenerated in order to take into account every change in service files (new service files or updated
-                service files), including new dependencies, changes in startup scripts, etc ;
-            - Containers are then restarted ;
-            - Finally, Hawkbit server is notified with the result of the update (failure or success) : the details (exit code, name, etc) about 
-                which app failed to start is given.
+        Collect the required update size and the partition to check.
 
-        :param dictionnary base: Dictionnary storing information about a Hawkbit update.
+        :param str action_id: Hawkbit action identifier.
+        :return: Required update size in MB and the partition path.
+        :rtype: tuple
         """
-        feedbackMsg = ''
-        
-        if self.action_id is not None:
-            self.logger.info('Deployment is already in progress')
-            return
-
-        # retrieve action id and resource parameter from URL
-        deployment = base['_links']['deploymentBase']['href']
-        match = re.search(r'/deploymentBase/([^/?]+)', deployment)
-        if not match:
-            raise APIError("Invalid deploymentBase href: {}".format(deployment))
-        action_id = match.group(1)
-        resource = parse_qs(urlparse(deployment).query).get('c', [None])[0]
-        # fetch deployment information
-        deploy_info = await self.ddi.deploymentBase[action_id](resource)
-        reboot_needed = False
-
-        chunks_qty = len(deploy_info['deployment']['chunks'])
-
-        if chunks_qty == 0:
-            msg = 'Deployment without chunks found. Ignoring'
-            status_execution = DeploymentStatusExecution.closed
-            status_result = DeploymentStatusResult.failure
-            await self.ddi.deploymentBase[action_id].feedback(
-                status_execution, status_result, [msg])
-            raise APIError(msg)
-        else:
-            msg = "FullMetalUpdate:Proceeding"
-            percentage = {"cnt": 0, "of": chunks_qty}
-            status_execution = DeploymentStatusExecution.proceeding
-            status_result = DeploymentStatusResult.none
-            await self.ddi.deploymentBase[action_id].feedback(
-                status_execution, status_result, [msg],
-                percentage=percentage)
-
-        self.action_id = action_id
-
-        # all DSs
         distribution_sets_raw = [
             item for item in await self._get_distribution_sets()
             if (isinstance(item.get('version'), str)
@@ -400,18 +353,23 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
         distribution_set_id = None
         distribution_set = None
         update_type = ''
+        partition_to_check = None
 
         try:
-            distribution_set_id = await self.management.get_distribution_set_id(
-                self.ddi.controller_id,
-                action_id)
+            distribution_set_id = (
+                await self.management.get_distribution_set_id(
+                    self.ddi.controller_id,
+                    action_id))
         except Exception as e:
             self.logger.warning(
-                "Failed to read Distribution Set metadata info via Management API; "
-                "falling back to chunk metadata: {}".format(e))
+                "Failed to read Distribution Set metadata info via "
+                "Management API; falling back to chunk metadata: {}".format(e))
 
         if distribution_set_id is not None:
-            distribution_set = next((item for item in distribution_sets_raw if item.get('id') == distribution_set_id), None)
+            distribution_set = next(
+                (item for item in distribution_sets_raw
+                 if item.get('id') == distribution_set_id),
+                None)
 
         if distribution_set is not None:
             update_type = distribution_set.get('type', '')
@@ -420,16 +378,18 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
                 'os': updater_paths.PATH_OS,
             }.get(update_type)
 
-            # filter out distribution_sets_raw based on update type (os, app)
-            distribution_sets_raw = [item for item in distribution_sets_raw if item.get('type') == update_type]
-            # sort them ascending by version
+            distribution_sets_raw = [
+                item for item in distribution_sets_raw
+                if item.get('type') == update_type
+            ]
             distribution_sets_raw.sort(
                 key=lambda item: (
-                        tuple(int(part) for part in item['version'].split('.'))
-                        + (0,) * (2 - item['version'].count('.'))))
-        # hydrate distribution sets with their metadata
+                    tuple(int(part) for part in item['version'].split('.'))
+                    + (0,) * (2 - item['version'].count('.'))))
+
         distribution_sets = (
-            await self._add_metadata_to_distribution_sets(distribution_sets_raw)
+            await self._add_metadata_to_distribution_sets(
+                distribution_sets_raw)
             if distribution_sets_raw is not None
             else []
         )
@@ -488,6 +448,64 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
                 total_size_mb = 0
 
             update_total_size_mb += total_size_mb
+
+        return update_total_size_mb, partition_to_check
+
+    async def process_deployment(self, base):
+        """
+        This method performs a Hawkbit update in several steps :
+            - Retrieves information about the Hawkbit update based on base dictionnary ;
+            - Notifies Hawkbit server about the appropriate start of the update ;
+            - All chunks are then parsed and processed, ie
+                1) OS chunks cause a system update (see update_system method) and a system reboot ;
+                2) Apps chunks cause apps updates (see update_container method). An app / container that implements the notify feature of systemd is
+                    associated with a feedback thread, which monitors its execution and feedbacks the FMU client if the app succesfully started or not;
+            - Systemd dependency tree is regenerated in order to take into account every change in service files (new service files or updated
+                service files), including new dependencies, changes in startup scripts, etc ;
+            - Containers are then restarted ;
+            - Finally, Hawkbit server is notified with the result of the update (failure or success) : the details (exit code, name, etc) about
+                which app failed to start is given.
+
+        :param dictionnary base: Dictionnary storing information about a Hawkbit update.
+        """
+        feedbackMsg = ''
+
+        if self.action_id is not None:
+            self.logger.info('Deployment is already in progress')
+            return
+
+        # retrieve action id and resource parameter from URL
+        deployment = base['_links']['deploymentBase']['href']
+        match = re.search(r'/deploymentBase/([^/?]+)', deployment)
+        if not match:
+            raise APIError("Invalid deploymentBase href: {}".format(deployment))
+        action_id = match.group(1)
+        resource = parse_qs(urlparse(deployment).query).get('c', [None])[0]
+        # fetch deployment information
+        deploy_info = await self.ddi.deploymentBase[action_id](resource)
+        reboot_needed = False
+
+        chunks_qty = len(deploy_info['deployment']['chunks'])
+
+        if chunks_qty == 0:
+            msg = 'Deployment without chunks found. Ignoring'
+            status_execution = DeploymentStatusExecution.closed
+            status_result = DeploymentStatusResult.failure
+            await self.ddi.deploymentBase[action_id].feedback(
+                status_execution, status_result, [msg])
+            raise APIError(msg)
+        else:
+            msg = "FullMetalUpdate:Proceeding"
+            percentage = {"cnt": 0, "of": chunks_qty}
+            status_execution = DeploymentStatusExecution.proceeding
+            status_result = DeploymentStatusResult.none
+            await self.ddi.deploymentBase[action_id].feedback(
+                status_execution, status_result, [msg],
+                percentage=percentage)
+
+        self.action_id = action_id
+
+        update_total_size_mb, partition_to_check = (await self.collect_free_space_requirements(action_id))
 
         if update_total_size_mb and partition_to_check is not None:
             free_space_mb = self._check_partition_space_mb(partition_to_check)
