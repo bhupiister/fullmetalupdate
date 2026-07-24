@@ -414,26 +414,30 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
 
         distributions_to_apply = []
         if (isinstance(current_ds_version, str)
+                and isinstance(target_ds_version, str)
                 and re.fullmatch(
                     r'[0-9]+\.[0-9]+(?:\.[0-9]+)?', current_ds_version)
                 and isinstance(target_ds_version, str)
                 and re.fullmatch(
                     r'[0-9]+\.[0-9]+(?:\.[0-9]+)?', target_ds_version)):
-            current_version = tuple(
-                int(part) for part in current_ds_version.split('.'))
+            current_version = tuple(int(part) for part in current_ds_version.split('.'))
             current_version += (0,) * (3 - len(current_version))
-            target_version = tuple(
-                int(part) for part in target_ds_version.split('.'))
+            target_version = tuple(int(part) for part in target_ds_version.split('.'))
             target_version += (0,) * (3 - len(target_version))
 
-            distributions_to_apply = [
-                item for item in distribution_sets
-                if (current_version
-                    < (tuple(
-                        int(part) for part in item['version'].split('.'))
-                       + (0,) * (2 - item['version'].count('.')))
-                    <= target_version)
-            ]
+            is_downgrade = target_version < current_version
+            for item in distribution_sets:
+                item_version = tuple(
+                    int(part) for part in item['version'].split('.'))
+                item_version += (0,) * (3 - len(item_version))
+
+                if is_downgrade:
+                    is_in_version_range = (target_version <= item_version < current_version)
+                else:
+                    is_in_version_range = (current_version < item_version <= target_version)
+
+                if is_in_version_range:
+                    distributions_to_apply.append(item)
 
         update_total_size_mb = 0
         for item in distributions_to_apply:
