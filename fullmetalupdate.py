@@ -119,6 +119,13 @@ async def main():
 
     DEV_MODE = config.getboolean("dev", "enabled", fallback=False)
     DEV_STATE_DIR = config.get("dev", "state_dir", fallback=None)
+
+    # Legacy per-container OSTree support is disabled for the new Podman/ext4 app flow.
+    CONTAINER_OSTREE_ENABLED = config.getboolean(
+        "applications",
+        "container_ostree_enabled",
+        fallback=False,
+    )
     if DEV_STATE_DIR:
         dev_state_path = Path(DEV_STATE_DIR)
         if not dev_state_path.is_absolute():
@@ -224,10 +231,14 @@ async def main():
             DEV_MODE,
             DEV_STATE_DIR,
             management_client,
+            CONTAINER_OSTREE_ENABLED,
         )
 
-        if not client.init_checkout_existing_containers():
-            client.logger.info("There is no containers pre-installed on the target")
+        if CONTAINER_OSTREE_ENABLED:
+            if not client.init_checkout_existing_containers():
+                client.logger.info("There are no legacy OSTree containers pre-installed on the target")
+        else:
+            client.logger.info("Skipping legacy container OSTree initialization")
 
         if not client.init_ostree_remotes(OSTREE_REMOTE_ATTRIBUTES):
             client.logger.error(

@@ -53,8 +53,14 @@ class DBUSException(Exception):
 
 
 class AsyncUpdater(object):
-    def __init__(self, dev_mode=False, dev_state_dir=None):
+    def __init__(
+        self,
+        dev_mode=False,
+        dev_state_dir=None,
+        container_ostree_enabled=False,
+    ):
         self.ostree_remote_attributes = None
+        self.container_ostree_enabled = container_ostree_enabled
         self.logger = logging.getLogger('fullmetalupdate_container_updater')
         self.dev_mode = dev_mode
 
@@ -83,7 +89,12 @@ class AsyncUpdater(object):
             self.repo_os = repo
 
         self.remote_name_os = None
-        self.repo_containers = self._open_or_create_repo(PATH_REPO_APPS)
+        self.repo_containers = None
+
+        if self.container_ostree_enabled:
+            self.repo_containers = self._open_or_create_repo(PATH_REPO_APPS)
+        else:
+            self.logger.info("Legacy container OSTree support is disabled")
 
     def _configure_dev_paths(self, dev_state_dir):
         global PATH_APPS, PATH_OS, PATH_REPO_OS, PATH_REPO_APPS
@@ -185,22 +196,25 @@ class AsyncUpdater(object):
             self.repo_os.remote_add(os_remote, os_url, opts, None)
             self.remote_name_os = os_remote
 
-            remote_name = "mad-matisse-gen3-containers"
-            containers_url = ostree_remote_attributes['url']
+            if self.container_ostree_enabled:
+                remote_name = "mad-matisse-gen3-containers"
+                containers_url = ostree_remote_attributes['url']
 
-            self.logger.info(
-                "Initalize remotes for the containers ostree: %s",
-                remote_name
-            )
-
-            if remote_name in self.repo_containers.remote_list():
                 self.logger.info(
-                    "Containers remote %s already exists, deleting and re-adding",
+                    "Initialize remotes for the legacy containers OSTree: %s",
                     remote_name
                 )
-                self.repo_containers.remote_delete(remote_name, None)
 
-            self.repo_containers.remote_add(remote_name, containers_url, opts, None)
+                if remote_name in self.repo_containers.remote_list():
+                    self.logger.info(
+                        "Containers remote %s already exists, deleting and re-adding",
+                        remote_name
+                    )
+                    self.repo_containers.remote_delete(remote_name, None)
+
+                self.repo_containers.remote_add(remote_name, containers_url, opts, None)
+            else:
+                self.logger.info("Skipping legacy containers OSTree remote initialization")
 
         except GLib.Error as e:
             self.logger.error("OSTRee remote initialization failed (%s)", str(e))
@@ -340,6 +354,10 @@ class AsyncUpdater(object):
         return True
 
     def init_checkout_existing_containers(self):
+        if not self.container_ostree_enabled:
+            self.logger.info("Legacy container OSTree checkout is disabled")
+            return True
+
         res = True
         self.logger.info("Getting refs from repo:{}".format(PATH_REPO_APPS))
 
@@ -447,6 +465,8 @@ class AsyncUpdater(object):
         res = True
 
         if is_container:
+            if not self.container_ostree_enabled or self.repo_containers is None:
+                raise RuntimeError("Legacy container OSTree updates are disabled")
             repo = self.repo_containers
         else:
             repo = self.repo_os
@@ -861,3 +881,4 @@ class AsyncUpdater(object):
         except subprocess.CalledProcessError as e:
             self.logger.error("Deleting init_var variable from u-boot environment failed ({})".format(e))
             raise
+
