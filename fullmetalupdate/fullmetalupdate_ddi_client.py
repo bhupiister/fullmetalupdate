@@ -436,7 +436,7 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
                 item_version += (0,) * (3 - len(item_version))
 
                 if is_downgrade:
-                    is_in_version_range = (target_version <= item_version < current_version)
+                    is_in_version_range = (target_version < item_version <= current_version)
                 else:
                     is_in_version_range = (current_version < item_version <= target_version)
 
@@ -909,4 +909,3 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
                 end_msg = "\nContainer has failed to rollback."
 
         return end_msg
-
