@@ -95,18 +95,22 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
         the starting process of the associated container went well or not.
         feedbackResults =  {container-sd-notify : {status_result : ... , msg : ...}}
     :param Lock mutexResults: Mutex that protects feedbackResults from concurrent accesses (accesses from main thread and accesses
-        from feedback threads). 
+        from feedback threads).
     """
 
     def __init__(self, session, host, ssl, tenant_id, target_name, auth_token,
                  attributes, dev_mode=False, dev_state_dir=None,
-                 management_client=None):
+                 management_client=None, container_ostree_enabled=False):
         """ Constructor of FullMetalUpdateDDIClient Class.
         """
         if dev_mode:
             self._configure_client_dev_paths(dev_state_dir)
 
-        super(FullMetalUpdateDDIClient, self).__init__(dev_mode, dev_state_dir)
+        super(FullMetalUpdateDDIClient, self).__init__(
+            dev_mode,
+            dev_state_dir,
+            container_ostree_enabled,
+        )
 
         self.attributes = attributes
 
@@ -181,9 +185,9 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
         return free_space_mb
 
     async def start_polling(self, wait_on_error=60):
-        """ 
+        """
         Wrapper around self.poll_base_resource() for exception handling.
-        
+
         :param int wait_on_error: Timeout before retry on polling failled
         """
 
@@ -217,11 +221,11 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
 
     async def cancel(self, base):
         """
-        Acknoledges cancelation request, retrives ID of Hawkbit update to be cancelled, cancels the relevant Hawkbit update 
+        Acknoledges cancelation request, retrives ID of Hawkbit update to be cancelled, cancels the relevant Hawkbit update
         and finally notify the Hawkbit server about the result of the cancelation process.
 
         TODO : Implement Hawkbit Update cancelation (this method does not seem to do what it is meant to do)
-        
+
         :param dictionnary base: Dictionnary storing information about a Hawkbit update.
         """
         self.logger.info('Received cancelation request')
@@ -244,20 +248,20 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
         This method performs a Hawkbit update in several steps :
             - Retrieves information about the Hawkbit update based on base dictionnary ;
             - Notifies Hawkbit server about the appropriate start of the update ;
-            - All chunks are then parsed and processed, ie 
+            - All chunks are then parsed and processed, ie
                 1) OS chunks cause a system update (see update_system method) and a system reboot ;
-                2) Apps chunks cause apps updates (see update_container method). An app / container that implements the notify feature of systemd is 
+                2) Apps chunks cause apps updates (see update_container method). An app / container that implements the notify feature of systemd is
                     associated with a feedback thread, which monitors its execution and feedbacks the FMU client if the app succesfully started or not;
             - Systemd dependency tree is regenerated in order to take into account every change in service files (new service files or updated
                 service files), including new dependencies, changes in startup scripts, etc ;
             - Containers are then restarted ;
-            - Finally, Hawkbit server is notified with the result of the update (failure or success) : the details (exit code, name, etc) about 
+            - Finally, Hawkbit server is notified with the result of the update (failure or success) : the details (exit code, name, etc) about
                 which app failed to start is given.
 
         :param dictionnary base: Dictionnary storing information about a Hawkbit update.
         """
         feedbackMsg = ''
-        
+
         if self.action_id is not None:
             self.logger.info('Deployment is already in progress')
             return
@@ -426,7 +430,7 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
                update['status_result'] = DeploymentStatusResult.success
 
             final_result &= (update['status_result'] == DeploymentStatusResult.success)
-        
+
         if(final_result):
             msg = "Hawkbit Update Success : All applications have been updated and correctly restarted."
             self.logger.info(msg)
@@ -445,8 +449,8 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
                 self.logger.error("Reboot failed: {}".format(e))
 
     async def sleep(self, base):
-        """ 
-        Timeout between two Hawkbit server polling tryouts. This sleep time is suggested by HawkBit. 
+        """
+        Timeout between two Hawkbit server polling tryouts. This sleep time is suggested by HawkBit.
 
         :param dictionnary base: Dictionnary storing information about a Hawkbit update.
         """
@@ -488,6 +492,13 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
         :param int notify: Set to 1 if the container is a notify container.
         :param int timeout: Timeout value of the communication socket.
         """
+        if not self.container_ostree_enabled:
+            self.logger.error(
+                "Rejecting legacy bApp update for %s: container OSTree is disabled",
+                container_name,
+            )
+            return False
+
         try:
             self.init_container_remote(container_name)
             self.pull_ostree_ref(True, rev_number, container_name)
@@ -664,7 +675,7 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
             os.remove(DIR_NOTIFY_SOCKET + sock_name)
         except FileNotFoundError as e:
             self.logger.error("Error while removing socket ({})".format(e))
-        
+
         self.mutexResults.acquire()
         self.feedbackResults[container_name] = dict.fromkeys(("status_update", "msg"))
         self.feedbackResults[container_name]["status_update"] = status_update
@@ -699,3 +710,4 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
                 end_msg = "\nContainer has failed to rollback."
 
         return end_msg
+
