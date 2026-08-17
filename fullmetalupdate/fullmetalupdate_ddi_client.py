@@ -68,7 +68,40 @@ class HawkbitManagementClient(object):
 
                 return await resp.json()
 
-    async def get_distribution_set_metadata(self, target_id, action_id):
+    async def get_distribution_sets(self):
+        distribution_sets = []
+        page_size = 100
+        offset = 0
+        next_page = '/rest/v1/distributionsets?offset=0&limit={}'.format(
+            page_size)
+
+        while next_page:
+            page = await self.get_resource(next_page)
+            content = page.get('content', [])
+            distribution_sets.extend(content)
+
+            if not content:
+                break
+
+            total = page.get('total')
+            if total is not None and len(distribution_sets) >= total:
+                break
+
+            next_link = page.get('_links', {}).get('next')
+            next_page = (next_link.get('href')
+                         if isinstance(next_link, dict) else None)
+
+            if not next_page:
+                if len(content) < page_size:
+                    break
+                offset += 1
+                next_page = (
+                    '/rest/v1/distributionsets?offset={}&limit={}'.format(
+                        offset, page_size))
+
+        return distribution_sets
+
+    async def get_distribution_set_id(self, target_id, action_id):
         action = await self.get_resource(
             '/rest/v1/targets/{targetId}/actions/{actionId}'.format(
                 targetId=target_id,
@@ -78,9 +111,29 @@ class HawkbitManagementClient(object):
         if not distributionset or 'href' not in distributionset:
             raise APIError('Management API action has no distributionset link')
 
-        metadata_href = distributionset['href'].rstrip('/').lstrip('http:') + '/metadata?offset=0&limit=100'
-        metadata = await self.get_resource(metadata_href)
-        return metadata.get('content', [])
+        distribution_set_id = urlparse(distributionset['href']).path.rstrip('/').rsplit('/', 1)[-1]
+        if not distribution_set_id:
+            raise APIError('Management API action has an invalid distributionset link')
+
+        try:
+            return int(distribution_set_id)
+        except ValueError:
+            raise APIError(
+                'Management API action has an invalid distributionset ID')
+
+    async def get_distribution_set(self, distribution_set_id):
+        return await self.get_resource(
+            '/rest/v1/distributionsets/{distributionSetId}'.format(
+                distributionSetId=distribution_set_id))
+
+    async def get_distribution_set_metadata(self, distribution_set_id):
+        metadata = await self.get_resource(
+            '/rest/v1/distributionsets/{distributionSetId}/metadata?offset=0&limit=100'.format(
+                distributionSetId=distribution_set_id))
+        return {
+            entry['key']: entry.get('value')
+            for entry in metadata.get('content', [])
+        }
 
 
 class FullMetalUpdateDDIClient(AsyncUpdater):
@@ -135,6 +188,37 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
         PATH_REBOOT_DATA = os.path.join(dev_state_dir, "reboot_data.json")
         DIR_NOTIFY_SOCKET = os.path.join(dev_state_dir, "notify")
 
+    def _get_installed_update_versions(self):
+        versions = {
+            'os_version': None,
+            'apps_version': None,
+        }
+
+        try:
+            result = subprocess.run(
+                ['sysinfo'],
+                check=True,
+                capture_output=True,
+                text=True)
+        except (OSError, subprocess.CalledProcessError) as e:
+            self.logger.error(
+                "Cannot read installed update versions using sysinfo: {}".format(
+                    e))
+            return versions
+
+        version_labels = {
+            'Build Version:': 'os_version',
+            'Apps Version:': 'apps_version',
+        }
+
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            for label, key in version_labels.items():
+                if line.startswith(label) and versions[key] is None:
+                    versions[key] = line[len(label):].strip() or None
+
+        return versions
+
     def _parse_update_info(self, value):
         if isinstance(value, str):
             self.logger.debug("Raw update info metadata: %r", value)
@@ -148,37 +232,49 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
         self.logger.debug("Parsed update info metadata: %r", info)
         return info
 
-    async def _get_distribution_set_info(self, action_id):
+    async def _get_distribution_sets(self):
+        if not self.management:
+            return []
+
+        return await self.management.get_distribution_sets()
+
+    async def _add_metadata_to_distribution_sets(self, distribution_sets):
+        if not self.management:
+            return distribution_sets
+
+        for distribution_set in distribution_sets:
+            distribution_set['metadata'] = (
+                await self.management.get_distribution_set_metadata(
+                    distribution_set['id']))
+
+        return distribution_sets
+
+    async def _get_distribution_set_info(self, distribution_set_id):
         if not self.management:
             return None
 
-        metadata = await self.management.get_distribution_set_metadata(
-            self.ddi.controller_id,
-            action_id)
+        metadata = await self.management.get_distribution_set_metadata(distribution_set_id)
 
-        for entry in metadata:
-            if entry.get('key') == 'info':
-                self.logger.info("Using Distribution Set metadata 'info'")
-                return self._parse_update_info(entry.get('value'))
+        if 'info' in metadata:
+            self.logger.info("Using Distribution Set metadata 'info'")
+            return self._parse_update_info(metadata['info'])
 
         return None
 
-    def _check_apps_partition_space_mb(self):
-        apps_path = updater_paths.PATH_APPS
-        # apps_path = '/apps'
-
+    def _check_partition_space_mb(self, partition_path):
         try:
-            disk_usage = shutil.disk_usage(apps_path)
+            disk_usage = shutil.disk_usage(partition_path)
         except FileNotFoundError:
-            self.logger.error("Cannot check free space: app partition path {} does not exist".format(apps_path))
+            self.logger.error("Cannot check free space: partition path {} does not exist".format(partition_path))
             return 0
         except OSError as e:
-            self.logger.error("Cannot check free space on app partition {}: {}".format(apps_path, e))
+            self.logger.error("Cannot check free space on partition {}: {}".format(partition_path, e))
             return 0
 
         free_space_mb = disk_usage.free / 1024 / 1024
         self.logger.info(
-            "App partition free space: %.2f MB available",
+            "Partition %s free space: %.2f MB available",
+            partition_path,
             free_space_mb
         )
 
@@ -243,6 +339,126 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
             CancelStatusResult.success,
             status_details=("Cancelling not supported",))
 
+    async def collect_free_space_requirements(self, action_id):
+        """
+        Collect the required update size and the partition to check.
+
+        :param str action_id: Hawkbit action identifier.
+        :return: Required update size in MB and the partition path.
+        :rtype: tuple
+        """
+        distribution_sets_raw = [
+            item for item in await self._get_distribution_sets()
+            if (isinstance(item.get('version'), str)
+                and re.fullmatch(
+                    r'[0-9]+\.[0-9]+(?:\.[0-9]+)?', item['version']))
+        ]
+
+        distribution_set_id = None
+        distribution_set = None
+        update_type = ''
+        partition_to_check = None
+
+        try:
+            distribution_set_id = (
+                await self.management.get_distribution_set_id(
+                    self.ddi.controller_id,
+                    action_id))
+        except Exception as e:
+            self.logger.warning(
+                "Failed to read Distribution Set metadata info via "
+                "Management API; falling back to chunk metadata: {}".format(e))
+
+        if distribution_set_id is not None:
+            distribution_set = next(
+                (item for item in distribution_sets_raw
+                 if item.get('id') == distribution_set_id),
+                None)
+
+        if distribution_set is not None:
+            update_type = distribution_set.get('type', '')
+            partition_to_check = {
+                'app': updater_paths.PATH_APPS,
+                'os': updater_paths.PATH_OS,
+            }.get(update_type)
+
+            distribution_sets_raw = [
+                item for item in distribution_sets_raw
+                if item.get('type') == update_type
+            ]
+            distribution_sets_raw.sort(
+                key=lambda item: (
+                    tuple(int(part) for part in item['version'].split('.'))
+                    + (0,) * (2 - item['version'].count('.'))))
+
+        distribution_sets = (
+            await self._add_metadata_to_distribution_sets(
+                distribution_sets_raw)
+            if distribution_sets_raw is not None
+            else []
+        )
+
+        for item in distribution_sets:
+            metadata = item.get('metadata', {})
+            if 'info' in metadata:
+                parsed_info = self._parse_update_info(metadata['info'])
+                item['distribution_set_info'] = parsed_info
+
+        installed_update_versions = self._get_installed_update_versions()
+        current_ds_version = {
+            'os': installed_update_versions.get('os_version'),
+            'app': installed_update_versions.get('apps_version'),
+        }.get(update_type)
+
+        target_ds_version = (
+            distribution_set.get('version')
+            if distribution_set is not None
+            else None
+        )
+
+        distributions_to_apply = []
+        if (isinstance(current_ds_version, str)
+                and isinstance(target_ds_version, str)
+                and re.fullmatch(
+                    r'[0-9]+\.[0-9]+(?:\.[0-9]+)?', current_ds_version)
+                and isinstance(target_ds_version, str)
+                and re.fullmatch(
+                    r'[0-9]+\.[0-9]+(?:\.[0-9]+)?', target_ds_version)):
+            current_version = tuple(int(part) for part in current_ds_version.split('.'))
+            current_version += (0,) * (3 - len(current_version))
+            target_version = tuple(int(part) for part in target_ds_version.split('.'))
+            target_version += (0,) * (3 - len(target_version))
+
+            is_downgrade = target_version < current_version
+            for item in distribution_sets:
+                item_version = tuple(
+                    int(part) for part in item['version'].split('.'))
+                item_version += (0,) * (3 - len(item_version))
+
+                if is_downgrade:
+                    is_in_version_range = (target_version < item_version <= current_version)
+                else:
+                    is_in_version_range = (current_version < item_version <= target_version)
+
+                if is_in_version_range:
+                    distributions_to_apply.append(item)
+
+        update_total_size_mb = 0
+        for item in distributions_to_apply:
+            total_size_mb = item.get(
+                'distribution_set_info', {}).get('totalSizeMB', 0)
+            try:
+                total_size_mb = float(total_size_mb)
+            except (TypeError, ValueError):
+                self.logger.error(
+                    "Invalid totalSizeMB metadata value: {}".format(
+                        total_size_mb))
+                total_size_mb = 0
+
+            update_total_size_mb += total_size_mb
+
+        return update_total_size_mb, partition_to_check
+
     async def process_deployment(self, base):
         """
         This method performs a Hawkbit update in several steps :
@@ -297,33 +513,13 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
 
         self.action_id = action_id
 
-        seq = ('name', 'version', 'rev', 'part', 'autostart', 'autoremove', 'status_execution', 'status_update', 'status_result', 'notify', 'timeout')
-        updates = []
-        distribution_set_info = None
+        update_total_size_mb, partition_to_check = (await self.collect_free_space_requirements(action_id))
 
-        try:
-            distribution_set_info = await self._get_distribution_set_info(action_id)
-        except Exception as e:
-            self.logger.warning(
-                "Failed to read Distribution Set metadata info via Management API; "
-                "falling back to chunk metadata: {}".format(e))
-
-        ds_info_apps: list[dict] = (distribution_set_info or {}).get('apps', [])
-        print("ds_info_apps: {}".format(ds_info_apps))
-
-        try:
-            update_total_size_mb = float((distribution_set_info or {}).get('totalSizeMB', 0))
-        except (TypeError, ValueError):
-            self.logger.error(
-                "Invalid totalSizeMB metadata value: {}".format(
-                    (distribution_set_info or {}).get('totalSizeMB', 0)))
-            update_total_size_mb = 0
-
-        if update_total_size_mb != 0:
-            free_space_mb = self._check_apps_partition_space_mb()
+        if update_total_size_mb and partition_to_check is not None:
+            free_space_mb = self._check_partition_space_mb(partition_to_check)
             if free_space_mb < update_total_size_mb * (100 + UPDATE_GAP_PERCENT) / 100:
                 msg = "Not enough free space on app partition {}: {:.2f} MB available, {:.2f} MB required".format(
-                    updater_paths.PATH_APPS,
+                    partition_to_check,
                     free_space_mb,
                     update_total_size_mb
                 )
@@ -334,6 +530,9 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
                     [msg])
                 self.action_id = None
                 return
+
+        seq = ('name', 'version', 'rev', 'part', 'autostart', 'autoremove', 'status_execution', 'status_update', 'status_result', 'notify', 'timeout')
+        updates = []
 
         # Update process
         for chunk in deploy_info['deployment']['chunks']:
@@ -710,4 +909,3 @@ class FullMetalUpdateDDIClient(AsyncUpdater):
                 end_msg = "\nContainer has failed to rollback."
 
         return end_msg
-

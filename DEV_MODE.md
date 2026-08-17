@@ -71,7 +71,7 @@ For testing app update size checks on a dev machine, mount `/apps` as a limited
 
 ```bash
 sudo mkdir -p /apps
-sudo mount -t tmpfs -o size=128M tmpfs /apps
+sudo mount -t tmpfs -o size=11M tmpfs /apps
 df -h /apps
 ```
 
@@ -93,6 +93,52 @@ sudo umount /apps
 ```
 
 `tmpfs` contents are temporary and disappear when unmounted or after reboot.
+
+## Limited `/sysroot` partition
+
+For testing OS update size checks on a development machine, mount `/sysroot` as
+a limited `tmpfs` filesystem. Do not do this on a target device or a host that
+uses `/sysroot` for its real operating system.
+
+First, check whether `/sysroot` is already a mount point:
+
+```bash
+findmnt /sysroot
+```
+
+If this shows an existing system mount, do not replace it. On a development
+machine where `/sysroot` is unused, create and mount the test filesystem:
+
+```bash
+sudo mkdir -p /sysroot
+sudo mount -t tmpfs -o size=12M tmpfs /sysroot
+findmnt /sysroot
+df -h /sysroot
+```
+
+Change `128M` to the partition size needed for the test. For an OS Distribution
+Set, set `type` to `os` and provide a non-zero `totalSizeMB` in its `info`
+metadata. The free-space check includes `UPDATE_GAP_PERCENT` (currently 10%), so
+an update with `totalSizeMB` set to `120` requires at least `132 MB` free and
+should be rejected by a `128M` test filesystem.
+
+Unmount the test filesystem when finished:
+
+```bash
+sudo umount /sysroot
+```
+
+If `/sysroot` is busy, check which process is using it, stop that process or
+leave the directory, then retry:
+
+```bash
+sudo lsof +f -- /sysroot
+cd /
+sudo umount /sysroot
+```
+
+Mounting the `tmpfs` temporarily hides existing files under `/sysroot` without
+deleting them. Its own contents disappear when it is unmounted or after reboot.
 
 ## Debugging
 

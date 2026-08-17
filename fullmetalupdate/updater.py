@@ -16,6 +16,7 @@ from gi.repository import OSTree, GLib, Gio
 from pydbus import SystemBus
 
 PATH_APPS = '/apps'
+PATH_OS = '/sysroot'
 PATH_REPO_OS = '/ostree/repo/'
 PATH_REPO_APPS = PATH_APPS + '/ostree_repo'
 PATH_SYSTEMD_UNITS = '/etc/systemd/system/'
@@ -96,7 +97,7 @@ class AsyncUpdater(object):
             self.logger.info("Legacy container OSTree support is disabled")
 
     def _configure_dev_paths(self, dev_state_dir):
-        global PATH_APPS, PATH_REPO_OS, PATH_REPO_APPS
+        global PATH_APPS, PATH_OS, PATH_REPO_OS, PATH_REPO_APPS
         global PATH_SYSTEMD_UNITS, PATH_CURRENT_REVISIONS
 
         if not dev_state_dir:
@@ -104,12 +105,14 @@ class AsyncUpdater(object):
 
         dev_state_dir = os.path.abspath(dev_state_dir)
         PATH_APPS = os.path.join(dev_state_dir, "apps")
+        PATH_OS = os.path.join(dev_state_dir, "sysroot")
         PATH_REPO_OS = os.path.join(dev_state_dir, "ostree", "repo")
         PATH_REPO_APPS = os.path.join(PATH_APPS, "ostree_repo")
         PATH_SYSTEMD_UNITS = os.path.join(dev_state_dir, "systemd")
         PATH_CURRENT_REVISIONS = os.path.join(dev_state_dir, "current_revs.json")
 
         os.makedirs(PATH_APPS, exist_ok=True)
+        os.makedirs(PATH_OS, exist_ok=True)
         os.makedirs(os.path.dirname(PATH_REPO_OS), exist_ok=True)
         os.makedirs(PATH_SYSTEMD_UNITS, exist_ok=True)
         os.makedirs(os.path.dirname(PATH_CURRENT_REVISIONS), exist_ok=True)
